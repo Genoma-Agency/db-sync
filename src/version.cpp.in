@@ -1,0 +1,14 @@
+#include <version.h>
+
+namespace dbsync {
+
+const std::string APP_NAME = "${CMAKE_PROJECT_NAME}";
+const std::string APP_VERSION = "${CMAKE_PROJECT_VERSION}";
+const std::string APP_VERSION_MAJOR = "${CMAKE_PROJECT_VERSION_MAJOR}";
+const std::string APP_VERSION_MINOR = "${CMAKE_PROJECT_VERSION_MINOR}";
+const std::string APP_VERSION_PATCH = "${CMAKE_PROJECT_VERSION_PATCH}";
+const std::string APP_GIT_HASH = "${GIT_HASH}";
+const std::string APP_GIT_DESC = "${GIT_DESC}";
+const std::string APP_RELEASE = "${CMAKE_PROJECT_VERSION} ${GIT_DESC}/${GIT_HASH}";
+
+}

@@ -1,0 +1,50 @@
+cmake_minimum_required(VERSION 3.14)
+
+project(db-sync LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(SOCI REQUIRED COMPONENTS soci_core soci_mysql)
+find_package(Boost 1.81 REQUIRED COMPONENTS date_time)
+find_package(log4cxx REQUIRED)
+
+set(GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${GENERATED})
+message("generated directory: ${GENERATED}")
+include(cmake/MakeVersion.cmake)
+
+include_directories(
+    include
+    ${LOG4CXX_INCLUDE_DIRS}
+)
+
+file(GLOB APP_HEADERS ${PROJECT_SOURCE_DIR}/include/*.h)
+list(JOIN APP_HEADERS "\n" STR_HEADERS)
+message("APP_HEADERS:\n${STR_HEADERS}")
+
+file(GLOB APP_SOURCES ${PROJECT_SOURCE_DIR}/src/*.cpp)
+list(JOIN APP_SOURCES "\n" STR_SOURCES)
+message("APP_SOURCES:\n${STR_SOURCES}")
+
+file(GLOB GEN_SOURCES ${GENERATED}/*.cpp)
+list(JOIN GEN_SOURCES "\n" STR_GEN)
+message("GEN_SOURCES:\n${STR_GEN}")
+
+add_executable(db-sync
+    ${APP_HEADERS}
+    ${APP_SOURCES}
+    ${GEN_SOURCES}
+    include/main.h
+)
+target_link_libraries(db-sync
+    log4cxx
+    SOCI::soci_core
+    SOCI::soci_mysql
+)
+
+include(GNUInstallDirs)
+install(TARGETS db-sync
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)

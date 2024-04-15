@@ -17,7 +17,38 @@
 
 #pragma once
 
+#include <boost/algorithm/algorithm.hpp>
+#include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional_io.hpp>
+#include <cassert>
+#include <chrono>
+#include <fmt/core.h>
+#include <fmt/ostream.h>
 #include <format>
+#include <iomanip>
+#include <iostream>
+#include <log4cxx/logger.h>
+#include <optional>
+#include <set>
+#include <soci/soci.h>
 #include <string>
+#include <time.h>
+#include <variant>
 #include <vector>
 #include <version.h>
+
+namespace b = boost;
+namespace bf = boost::filesystem;
+namespace ba = boost::algorithm;
+
+namespace dbsync {
+
+// log categories
+extern const char* LOG_MAIN;
+extern const char* LOG_DB;
+extern const char* LOG_EXEC;
+extern const char* LOG_DATA;
+
+}

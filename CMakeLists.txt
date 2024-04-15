@@ -6,8 +6,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(SOCI REQUIRED COMPONENTS soci_core soci_mysql)
-find_package(Boost 1.81 REQUIRED COMPONENTS date_time program_options)
+find_package(Boost 1.81 REQUIRED COMPONENTS date_time program_options filesystem)
 find_package(log4cxx REQUIRED)
+find_package(fmt REQUIRED)
 
 set(GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED})
@@ -39,6 +40,7 @@ add_executable(db-sync
 )
 target_link_libraries(db-sync
     log4cxx
+    fmt::fmt
     SOCI::soci_core
     SOCI::soci_mysql
     ${Boost_LIBRARIES}

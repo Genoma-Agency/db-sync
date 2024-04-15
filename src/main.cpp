@@ -17,14 +17,15 @@
 
 #include <main.h>
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional_io.hpp>
 #include <boost/program_options.hpp>
-#include <iostream>
+#include <db.h>
+#include <log4cxx/basicconfigurator.h>
+#include <log4cxx/xml/domconfigurator.h>
+#include <operation.h>
 
-namespace b = boost;
 namespace po = boost::program_options;
 
+b::optional<std::string> logConfig;
 b::optional<std::string> operation;
 b::optional<std::string> fromHost;
 b::optional<int> fromPort;
@@ -36,7 +37,7 @@ b::optional<int> toPort;
 b::optional<std::string> toUser;
 b::optional<std::string> toPwd;
 b::optional<std::string> toSchema;
-b::optional<std::vector<std::string>> tables;
+std::vector<std::string> tables;
 
 const po::options_description OPTIONS = [] {
   po::options_description options{ "Allowed arguments" };
@@ -45,6 +46,8 @@ const po::options_description OPTIONS = [] {
   options.add_options()("copy,c", "copy records from source to target");
   options.add_options()("sync,s", "sync records from source to target");
   options.add_options()("dry-run,d", "execute without modifying the target database");
+  options.add_options()("update", "enable update of records from source to target");
+  options.add_options()("disablebinlog", "disable binary log (privilege required)");
   options.add_options()("fromHost", po::value<>(&fromHost), "source database host IP or name");
   options.add_options()("fromPort", po::value<>(&fromPort)->default_value(3306), "source database port");
   options.add_options()("fromUser", po::value<>(&fromUser), "source database username");
@@ -55,14 +58,19 @@ const po::options_description OPTIONS = [] {
   options.add_options()("toUser", po::value<>(&toUser), "target database username");
   options.add_options()("toPwd", po::value<>(&toPwd), "target database password");
   options.add_options()("toSchema", po::value<>(&toSchema), "target database schema");
-  options.add_options()(
-      "tables", po::value<>(&tables)->multitoken()->default_value(std::vector<std::string>(), ""), "tables to process");
+  options.add_options()("tables",
+                        po::value<>(&tables)->multitoken()->composing()->default_value(std::vector<std::string>(), ""),
+                        "tables to process (if none are provided, use all tables)");
+  options.add_options()("logConfig, l",
+                        po::value<>(&logConfig)->default_value(std::string{ "./db-sync-log.xml" }),
+                        "path of logger xml configuration");
   return options;
 }();
 
 po::variables_map params;
 
 int main(int argc, char* argv[]) {
+  std::setlocale(LC_ALL, "en_US.UTF-8");
   try {
     auto parsed = po::parse_command_line(argc, argv, OPTIONS);
     po::store(parsed, params);
@@ -88,11 +96,103 @@ int main(int argc, char* argv[]) {
     return 0;
   }
 
-  bool dryRun = params.count("dry-run") > 0;
-  bool copy = params.count("copy") > 0;
-  bool sync = params.count("sync") > 0;
+  // configure logger
+  bool xml = false;
+  if(logConfig) {
+    if(!bf::exists(*logConfig)) {
+      std::cerr << "Logger configuration file not found: " << *logConfig << std::endl;
+    } else if(!bf::is_regular_file(*logConfig)) {
+      std::cerr << "Logger configuration file is not a regular file: " << *logConfig << std::endl;
+    } else {
+      auto logStatus = log4cxx::xml::DOMConfigurator::configure(*logConfig);
+      if(logStatus == log4cxx::spi::ConfigurationStatus::NotConfigured)
+        std::cerr << "Error initializing logger configuration (please check logger xml configuration file): "
+                  << *logConfig << std::endl;
+      else
+        xml = true;
+    }
+  }
+  if(!xml)
+    log4cxx::BasicConfigurator::configure();
 
-  std::cout << std::format("Execute copy {} sync {} dry-run {}", copy, sync, dryRun) << std::endl;
+  // configure source db
+  if(!fromHost || !fromUser || !fromPwd || !fromSchema) {
+    std::cerr << "All source arguments must be provided: fromHost, fromUser, fromPwd, fromSchema" << std::endl;
+    return 10;
+  }
+  std::unique_ptr<dbsync::Db> fromDb = std::make_unique<dbsync::Db>("source");
+  if(!fromDb->open(*fromHost, *fromPort, *fromSchema, *fromUser, *fromPwd)) {
+    std::cerr << "Source db connection error, see log file for details" << std::endl;
+    return 11;
+  }
+  if(!fromDb->readMetadata()) {
+    std::cerr << "Source db metadata error, see log file for details" << std::endl;
+    return 22;
+  }
+  fromDb->logTableInfo();
 
-  return 0;
+  // configure target db
+  if(!toHost || !toUser || !toPwd || !toSchema) {
+    std::cerr << "All target arguments must be provided: toHost, toUser, toPwd, toSchema" << std::endl;
+    return 20;
+  }
+  std::unique_ptr<dbsync::Db> toDb = std::make_unique<dbsync::Db>("target");
+  if(!toDb->open(*toHost, *toPort, *toSchema, *toUser, *toPwd)) {
+    std::cerr << "Target db connection error, see log file for details" << std::endl;
+    return 21;
+  }
+  if(!toDb->readMetadata()) {
+    std::cerr << "Target db metadata error, see log file for details" << std::endl;
+    return 22;
+  }
+  toDb->logTableInfo();
+
+  std::cout << "source and target database ready" << std::endl;
+
+  // ordino ed elimino diplucati da tables
+  std::sort(tables.begin(), tables.end());
+  auto duplicates = std::unique(tables.begin(), tables.end());
+  tables.erase(duplicates, tables.end());
+
+  dbsync::OperationConfig config{ .mode = params.count("copy") > 0 ? dbsync::Mode::Copy : dbsync::Mode::Sync,
+                                  .update = params.count("update") > 0,
+                                  .dryRun = params.count("dry-run") > 0,
+                                  .tables = tables,
+                                  .disableBinLog = params.count("disablebinlog") > 0 };
+
+  std::unique_ptr<dbsync::Operation> op
+      = std::make_unique<dbsync::Operation>(config, std::move(fromDb), std::move(toDb));
+
+  if(!op->checkMetadata()) {
+    std::cerr << "Metadata check failed" << std::endl;
+    return 30;
+  }
+
+  if(!op->preExecute()) {
+    std::cerr << "Pre execution failed" << std::endl;
+    return 40;
+  }
+
+  int ret = 0;
+
+  if(!op->execute()) {
+    std::cerr << "Execution failed" << std::endl;
+    ret = 100;
+  }
+
+  if(!op->postExecute(ret == 0)) {
+    std::cerr << "Post execution failed" << std::endl;
+  }
+
+  return ret;
+}
+
+namespace dbsync {
+
+// log categories
+const char* LOG_MAIN = "main";
+const char* LOG_DB = "db";
+const char* LOG_EXEC = "exec";
+const char* LOG_DATA = "data";
+
 }

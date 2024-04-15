@@ -10,6 +10,7 @@
 
     <appender name="FileAppender" class="org.apache.log4j.FileAppender">
         <param name="file" value="./db-sync.log"/>
+        <param name="append" value="false"/>
         <layout class="org.apache.log4j.PatternLayout">
             <param name="ConversionPattern" value="[%d{yyyy-MM-dd HH:mm:ss.SSS}] [%f] [%C#%M:%L] [%c] [%p] [%t] %m%n"/>
         </layout>
@@ -22,6 +23,18 @@
 
     <logger name="main" >
         <priority value="trace"/>
-      </logger>
+    </logger>
+
+    <logger name="db" >
+        <priority value="trace"/>
+    </logger>
+
+    <logger name="exec" >
+        <priority value="trace"/>
+    </logger>
+
+    <logger name="data" >
+        <priority value="trace"/>
+    </logger>
 
 </log4j:configuration>

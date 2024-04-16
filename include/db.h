@@ -23,6 +23,9 @@
 
 namespace dbsync {
 
+extern const std::string SQL_NULL_STRING;
+extern const std::string SQL_MD5_CHECK;
+
 /*****************************************************************************/
 
 struct ColumnInfo {
@@ -50,20 +53,35 @@ using MetadataMap = std::map<std::string, TableInfo>;
 
 class Field {
 public:
-  using value_t = std::variant<std::string, std::time_t, int, long long, unsigned long long, double>;
   Field(const soci::row& row, const std::size_t i);
-  const soci::data_type type() const { return dType; };
+  Field(const Field&) = delete;
+  Field(Field&&) = delete;
+  Field& operator=(const Field&) = delete;
+  Field& operator=(Field&&) = delete;
+  std::partial_ordering operator<=>(const Field& other) const;
+  const soci::data_type& type() const { return dType; };
   const soci::indicator& indicator() const { return dIndicator; };
+  bool isString() const { return dType == soci::dt_string || dType == soci::dt_xml || dType == soci::dt_blob; }
   bool isNull() const { return dIndicator == soci::i_null; }
-  const value_t& variant() const { return value; }
-  const std::string& toString() const { return valueString; };
-  std::partial_ordering operator<=>(const Field& other) const = default;
+  const std::string& asString() const { return value.string; };
+  const double& asDouble() const { return value.number.decimal; };
+  const int& asInt() const { return value.number.integer; };
+  const long long& asLongLong() const { return value.number.longLong; };
+  const unsigned long long& asULongLong() const { return value.number.uLongLong; };
 
 private:
   soci::data_type dType;
   soci::indicator dIndicator;
-  value_t value;
-  std::string valueString;
+  struct {
+    std::string string;
+    union {
+      std::time_t epoch;
+      double decimal;
+      int integer;
+      long long longLong;
+      unsigned long long uLongLong;
+    } number;
+  } value;
 };
 
 /*****************************************************************************/
@@ -87,14 +105,21 @@ public:
   bool query(const std::string& sql, std::function<void(const soci::row&)> consumer);
   bool exec(const std::string& sql);
   bool insertPrepare(const std::string& table);
-  bool insertExecute(const std::string& table, const TableRow& row);
-  bool selectPrepare(const std::string& table, const std::vector<std::string>& names);
-  bool selectExecute(const std::string& table, const TableRow& row, TableData& into);
+  bool insertExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
+  bool updatePrepare(const std::string& table, const strings& keys, const strings& fields);
+  bool updateExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
+  bool deletePrepare(const std::string& table, const strings& keys);
+  bool deleteExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
+  bool selectPrepare(const std::string& table, const strings& keys);
+  bool selectExecute(const std::string& table, const std::unique_ptr<TableRow>& row, TableData& into);
   soci::details::session_backend* backend() { return session->get_backend(); };
 
 private:
   bool apply(const std::string& opDesc, std::function<void(void)> lambda);
-  void bind(std::optional<soci::statement>& stmt, const TableRow& row);
+  void bind(std::optional<soci::statement>& stmt,
+            const std::unique_ptr<TableRow>& row,
+            const int startIndex,
+            const int endIndex);
 
 private:
   const std::string ref;
@@ -102,8 +127,9 @@ private:
   MetadataMap map;
   log4cxx::LoggerPtr log;
   std::string schema;
-  std::optional<soci::statement> stmtInsert;
-  std::optional<soci::statement> stmtSelect;
+  std::optional<soci::statement> stmtRead;
+  std::optional<soci::statement> stmtWrite;
+  int keysCount;
   soci::row rowSelect;
   std::string error;
 

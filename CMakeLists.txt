@@ -20,7 +20,7 @@ include_directories(
     ${LOG4CXX_INCLUDE_DIRS}
 )
 
-file(GLOB APP_HEADERS ${PROJECT_SOURCE_DIR}/include/*.h)
+file(GLOB APP_HEADERS ${PROJECT_SOURCE_DIR}/include/*.h ${PROJECT_SOURCE_DIR}/include/*.hxx)
 list(JOIN APP_HEADERS "\n" STR_HEADERS)
 message("APP_HEADERS:\n${STR_HEADERS}")
 
@@ -36,7 +36,6 @@ add_executable(db-sync
     ${APP_HEADERS}
     ${APP_SOURCES}
     ${GEN_SOURCES}
-    include/main.h
 )
 target_link_libraries(db-sync
     log4cxx

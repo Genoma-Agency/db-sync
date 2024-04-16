@@ -37,7 +37,7 @@ b::optional<int> toPort;
 b::optional<std::string> toUser;
 b::optional<std::string> toPwd;
 b::optional<std::string> toSchema;
-std::vector<std::string> tables;
+dbsync::strings tables;
 
 const po::options_description OPTIONS = [] {
   po::options_description options{ "Allowed arguments" };
@@ -59,7 +59,7 @@ const po::options_description OPTIONS = [] {
   options.add_options()("toPwd", po::value<>(&toPwd), "target database password");
   options.add_options()("toSchema", po::value<>(&toSchema), "target database schema");
   options.add_options()("tables",
-                        po::value<>(&tables)->multitoken()->composing()->default_value(std::vector<std::string>(), ""),
+                        po::value<>(&tables)->multitoken()->composing()->default_value(dbsync::strings(), ""),
                         "tables to process (if none are provided, use all tables)");
   options.add_options()("logConfig, l",
                         po::value<>(&logConfig)->default_value(std::string{ "./db-sync-log.xml" }),
@@ -194,5 +194,4 @@ const char* LOG_MAIN = "main";
 const char* LOG_DB = "db";
 const char* LOG_EXEC = "exec";
 const char* LOG_DATA = "data";
-
 }

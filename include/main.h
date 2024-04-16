@@ -45,10 +45,11 @@ namespace ba = boost::algorithm;
 
 namespace dbsync {
 
+using strings = std::vector<std::string>;
+
 // log categories
 extern const char* LOG_MAIN;
 extern const char* LOG_DB;
 extern const char* LOG_EXEC;
 extern const char* LOG_DATA;
-
 }

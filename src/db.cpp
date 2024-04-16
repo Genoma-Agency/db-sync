@@ -20,6 +20,9 @@
 
 namespace dbsync {
 
+const std::string SQL_NULL_STRING{ (const char*)u8"∅" };
+const std::string SQL_MD5_CHECK{ "`#MD5@CHECK#`" };
+
 const std::string Db::SQL_COLUMNS{ R"#(
 select
 	column_name as "NAME",
@@ -77,7 +80,7 @@ bool Db::open(const std::string& h, int p, const std::string& s, const std::stri
 bool Db::readMetadata() {
   return apply(
       "metadata", [this] {
-        std::vector<std::string> tables{ 1000 };
+        strings tables{ 1000 };
         session->get_table_names(), soci::into(tables);
         std::string table;
         ColumnInfo ci;
@@ -122,20 +125,16 @@ void Db::logTableInfo() const {
 bool Db::query(const std::string& sql, TableData& data) {
   return apply(sql, [&] {
     soci::rowset<soci::row> rs = (session->prepare << sql);
-    for(auto it = rs.begin(); it != rs.end(); ++it) {
-      auto& row = *it;
-      data.loadRow(row);
-    }
+    for(auto it = rs.begin(); it != rs.end(); ++it)
+      data.loadRow(*it);
   });
 }
 
 bool Db::query(const std::string& sql, std::function<void(const soci::row&)> consumer) {
   return apply(sql, [&] {
     soci::rowset<soci::row> rs = (session->prepare << sql);
-    for(auto it = rs.begin(); it != rs.end(); ++it) {
-      auto& row = *it;
-      consumer(row);
-    }
+    for(auto it = rs.begin(); it != rs.end(); ++it)
+      consumer(*it);
   });
 }
 
@@ -150,91 +149,135 @@ bool Db::insertPrepare(const std::string& table) {
     s << ",:v" << i;
   s << ')';
   std::string sql = s.str();
-  return apply(sql, [&] { stmtInsert = (session->prepare << sql); });
+  return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
 }
 
-bool Db::insertExecute(const std::string& table, const TableRow& row) {
-  assert(map.at(table).columns.size() == row.size());
-  assert(stmtInsert.has_value());
+bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
+  assert(map.at(table).columns.size() == row->size());
+  assert(stmtWrite.has_value());
   return apply("exec prepared insert", [&] {
-    bind(stmtInsert, row);
-    stmtInsert->execute(true);
-    stmtInsert->bind_clean_up();
+    bind(stmtWrite, row, 0, row->size());
+    stmtWrite->execute(true);
+    stmtWrite->bind_clean_up();
   });
 }
 
-bool Db::selectPrepare(const std::string& table, const std::vector<std::string>& names) {
-  assert(!names.empty());
+bool Db::updatePrepare(const std::string& table, const strings& keys, const strings& fields) {
+  assert(map.at(table).columns.size() == fields.size());
+  keysCount = keys.size();
   std::stringstream s;
-  s << "SELECT * FROM `" << table << "` WHERE `" << names[0] << "`=:v0";
-  for(int i = 1; i < names.size(); i++)
-    s << " AND `" << names[i] << "`=:v" << i;
+  s << "UPDATE `" << table << "` SET `" << fields[keysCount] << "`=:v0";
+  for(int i = keysCount + 1; i < fields.size(); i++)
+    s << ", `" << fields[i] << "`=:v" << i;
+  s << " WHERE `" << keys[0] << "`=:k0";
+  for(int i = 1; i < keysCount; i++)
+    s << " AND `" << keys[i] << "`=:k" << i;
   std::string sql = s.str();
-  return apply(sql, [&] { stmtSelect = (session->prepare << sql); });
+  return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
 }
 
-bool Db::selectExecute(const std::string& table, const TableRow& row, TableData& into) {
-  assert(stmtSelect.has_value());
+bool Db::updateExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
+  assert(map.at(table).columns.size() == row->size());
+  assert(stmtWrite.has_value());
+  row->rotate(keysCount);
+  return apply("exec prepared update", [&] {
+    bind(stmtWrite, row, 0, row->size());
+    stmtWrite->execute(true);
+    stmtWrite->bind_clean_up();
+  });
+}
+
+bool Db::deletePrepare(const std::string& table, const strings& keys) {
+  keysCount = keys.size();
+  assert(keysCount > 0);
+  std::stringstream s;
+  s << "DELETE FROM `" << table << "` WHERE `" << keys[0] << "`=:v0";
+  for(int i = 1; i < keysCount; i++)
+    s << " AND `" << keys[i] << "`=:v" << i;
+  std::string sql = s.str();
+  return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
+}
+
+bool Db::deleteExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
+  assert(stmtWrite.has_value());
+  return apply("exec prepared delete", [&] {
+    bind(stmtWrite, row, 0, keysCount);
+    stmtWrite->execute(true);
+    stmtWrite->bind_clean_up();
+  });
+}
+
+bool Db::selectPrepare(const std::string& table, const strings& keys) {
+  keysCount = keys.size();
+  assert(keysCount > 0);
+  std::stringstream s;
+  s << "SELECT * FROM `" << table << "` WHERE `" << keys[0] << "`=:v0";
+  for(int i = 1; i < keysCount; i++)
+    s << " AND `" << keys[i] << "`=:v" << i;
+  std::string sql = s.str();
+  return apply(sql, [&] { stmtRead = (session->prepare << sql); });
+}
+
+bool Db::selectExecute(const std::string& table, const std::unique_ptr<TableRow>& row, TableData& into) {
+  assert(stmtRead.has_value());
   return apply("exec prepared select", [&] {
-    bind(stmtSelect, row);
-    stmtSelect->exchange_for_rowset(soci::into(rowSelect));
-    stmtSelect->execute(true);
-    soci::rowset_iterator<soci::row> it(*stmtSelect, rowSelect);
+    bind(stmtRead, row, 0, keysCount);
+    stmtRead->exchange_for_rowset(soci::into(rowSelect));
+    stmtRead->execute(false);
+    soci::rowset_iterator<soci::row> it(*stmtRead, rowSelect);
     soci::rowset_iterator<soci::row> end;
     for(; it != end; ++it)
-      into.loadRow(*it);
-    stmtSelect->bind_clean_up();
+      into.loadRow(rowSelect);
+    stmtRead->bind_clean_up();
   });
 }
 
-void Db::bind(std::optional<soci::statement>& stmt, const TableRow& row) {
+void Db::bind(std::optional<soci::statement>& stmt,
+              const std::unique_ptr<TableRow>& row,
+              const int startIndex,
+              const int endIndex) {
   static std::string nullString;
   static double nullDouble = 0;
   static int nullInt = 0;
   static long long nullLongLong = 0;
   static unsigned long long nullULongLong = 0;
   static soci::indicator nullIndicator = soci::i_null;
+  assert(startIndex < endIndex);
   assert(stmt.has_value());
-  for(int i = 0; i < row.size(); i++) {
-    auto field = row[i];
-    switch(field.type()) {
+  for(int i = startIndex; i < endIndex; i++) {
+    switch(row->at(i)->type()) {
     case soci::dt_string:
     case soci::dt_xml:
     case soci::dt_blob:
-      if(field.isNull())
-        stmt->exchange(soci::use(nullString, nullIndicator));
-      else
-        stmt->exchange(soci::use(std::get<std::string>(field.variant())));
-      break;
     case soci::dt_date:
-      if(field.isNull())
+      if(row->at(i)->isNull())
         stmt->exchange(soci::use(nullString, nullIndicator));
       else
-        stmt->exchange(soci::use(field.toString()));
+        stmt->exchange(soci::use(row->at(i)->asString()));
       break;
     case soci::dt_double:
-      if(field.isNull())
+      if(row->at(i)->isNull())
         stmt->exchange(soci::use(nullDouble, nullIndicator));
       else
-        stmt->exchange(soci::use(std::get<double>(field.variant())));
+        stmt->exchange(soci::use(row->at(i)->asDouble()));
       break;
     case soci::dt_integer:
-      if(field.isNull())
+      if(row->at(i)->isNull())
         stmt->exchange(soci::use(nullInt, nullIndicator));
       else
-        stmt->exchange(soci::use(std::get<int>(field.variant())));
+        stmt->exchange(soci::use(row->at(i)->asInt()));
       break;
     case soci::dt_long_long:
-      if(field.isNull())
+      if(row->at(i)->isNull())
         stmt->exchange(soci::use(nullLongLong, nullIndicator));
       else
-        stmt->exchange(soci::use(std::get<long long>(field.variant())));
+        stmt->exchange(soci::use(row->at(i)->asLongLong()));
       break;
     case soci::dt_unsigned_long_long:
-      if(field.isNull())
+      if(row->at(i)->isNull())
         stmt->exchange(soci::use(nullULongLong, nullIndicator));
       else
-        stmt->exchange(soci::use(std::get<unsigned long long>(field.variant())));
+        stmt->exchange(soci::use(row->at(i)->asULongLong()));
       break;
     }
   }
@@ -243,46 +286,82 @@ void Db::bind(std::optional<soci::statement>& stmt, const TableRow& row) {
 
 /*****************************************************************************/
 
-Field::Field(const soci::row& row, const std::size_t i) {
+Field::Field(const soci::row& row, const std::size_t i)
+    : value{ .number{ .uLongLong = 0ul } } {
   auto props = row.get_properties(i);
   dType = props.get_data_type();
   dIndicator = row.get_indicator(i);
   if(dIndicator == soci::i_null) {
-    valueString = std::string((const char*)u8"∅");
+    value.string = SQL_NULL_STRING;
     return;
   }
   switch(dType) {
   case soci::dt_string:
   case soci::dt_xml:
   case soci::dt_blob:
-    value = row.get<std::string>(i);
-    valueString = row.get<std::string>(i);
+    value.string = row.get<std::string>(i);
     break;
   case soci::dt_double:
-    value = row.get<double>(i);
-    valueString = std::to_string(row.get<double>(i));
+    value.number.decimal = row.get<double>(i);
+    value.string = std::to_string(row.get<double>(i));
     break;
   case soci::dt_integer:
-    value = row.get<int>(i);
-    valueString = std::to_string(row.get<int>(i));
+    value.number.integer = row.get<int>(i);
+    value.string = std::to_string(row.get<int>(i));
     break;
   case soci::dt_long_long:
-    value = row.get<long long>(i);
-    valueString = std::to_string(row.get<long long>(i));
+    value.number.longLong = row.get<long long>(i);
+    value.string = std::to_string(row.get<long long>(i));
     break;
   case soci::dt_unsigned_long_long:
-    value = row.get<unsigned long long>(i);
-    valueString = std::to_string(row.get<unsigned long long>(i));
+    value.number.uLongLong = row.get<unsigned long long>(i);
+    value.string = std::to_string(row.get<unsigned long long>(i));
     break;
   case soci::dt_date:
     std::tm tm = row.get<std::tm>(i);
-    std::time_t epoch = std::mktime(&tm);
-    value = epoch;
-    std::chrono::system_clock::time_point tp{ std::chrono::seconds{ epoch } };
-    valueString = std::format("{:%F %T}", tp);
-    valueString.resize(sizeof "yyyy-mm-dd hh:mm:ss" - 1);
+    value.number.epoch = std::mktime(&tm);
+    std::chrono::system_clock::time_point tp{ std::chrono::seconds{ value.number.epoch } };
+    std::chrono::zoned_time zp{ std::chrono::current_zone(), tp };
+    value.string = std::format("{:%F %T}", zp);
+    value.string.resize(sizeof "yyyy-mm-dd hh:mm:ss" - 1);
     break;
   }
+}
+
+/*
+    static const partial_ordering less;
+    static const partial_ordering equivalent;
+    static const partial_ordering greater;
+    static const partial_ordering unordered;
+*/
+std::partial_ordering Field::operator<=>(const Field& other) const {
+  std::partial_ordering comp = std::partial_ordering::unordered;
+  if(dType == other.dType) {
+    if(dIndicator == soci::i_null)
+      if(other.dIndicator == soci::i_null)
+        comp = std::partial_ordering::equivalent;
+      else
+        comp = std::partial_ordering::less;
+    else if(other.dIndicator == soci::i_null)
+      comp = std::partial_ordering::greater;
+    else
+      switch(dType) {
+      case soci::dt_string:
+      case soci::dt_xml:
+      case soci::dt_blob:
+      case soci::dt_date:
+        return value.string <=> other.value.string;
+      case soci::dt_double:
+        return value.number.decimal <=> other.value.number.decimal;
+      case soci::dt_integer:
+        return value.number.integer <=> other.value.number.integer;
+      case soci::dt_long_long:
+        return value.number.longLong <=> other.value.number.longLong;
+      case soci::dt_unsigned_long_long:
+        return value.number.uLongLong <=> other.value.number.uLongLong;
+      }
+  }
+  return comp;
 }
 
 /*****************************************************************************/

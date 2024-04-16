@@ -21,6 +21,10 @@ namespace dbsync {
 
 log4cxx::LoggerPtr BaseData::log{ log4cxx::Logger::getLogger(LOG_DATA) };
 
+const int FEEDBACK = 100;
+
+using TimerMs = util::Timer<std::chrono::milliseconds>;
+
 Operation::Operation(const OperationConfig& c, std::unique_ptr<Db> src, std::unique_ptr<Db> dest) noexcept
     : config{ c }, fromDb{ std::move(src) }, toDb{ std::move(dest) } {}
 
@@ -134,7 +138,7 @@ bool Operation::postExecute(bool executeOk) {
 bool Operation::execute() {
   LOG4CXX_DEBUG_FMT(log, "start processing with configuration {}", config);
   bool ok = true;
-  timerGlobal.start();
+  TimerMs timer;
   auto iter = tables.begin();
   std::string m{ config.mode == Mode::Copy ? "Copy" : "Sync" };
   while((config.dryRun || ok) && iter != tables.end()) {
@@ -150,13 +154,13 @@ bool Operation::execute() {
     }
     iter++;
   }
-  std::cout << "completed in " << timerGlobal.elapsed().elapsed().string() << std::endl;
+  std::cout << "completed in " << timer.elapsed().elapsed().string() << std::endl;
   return ok;
 }
 
 bool Operation::execute(const std::string& table) {
   LOG4CXX_DEBUG_FMT(log, "start processing table \"{}\"", table);
-  timerTable.start();
+  TimerMs timer;
   std::string sqlKeys = buildSqlKeys(table);
   TableData srcKeys{ true, table, fromDb->metadata().at(table).rowCount, true };
   fromDb->query(sqlKeys, srcKeys);
@@ -169,88 +173,102 @@ bool Operation::execute(const std::string& table) {
     expected += diff.updateIndexes().size();
   if(config.mode == Mode::Sync)
     expected += diff.onlyDestIndexes().size();
-  timerTable.expected(expected);
+  timer.expected(expected);
   LOG4CXX_DEBUG_FMT(log,
                     "table `{}` compare result [only in source: {}] "
-                    "[common: {}] [only in destination: {}]",
+                    "[common: {}({})] [only in destination: {}]",
                     table,
                     diff.onlySrcIndexes().size(),
                     diff.commonIndexes().size(),
+                    diff.updateIndexes().size(),
                     diff.onlyDestIndexes().size());
-  int count = 1;
+  int count;
   TableData srcRecord{ true, table, 1 };
+  auto progress = [table, &timer, this](const char* title, int count, const std::vector<int>& v, bool endl) {
+    static const std::string spaces(20, ' ');
+    if(count == 1) {
+      std::cout << fmt::format("begin {} `{}` {} records\r", title, table, v.size());
+    } else {
+      auto times = timer.elapsed(count);
+      auto e = times.elapsed().string();
+      if(endl) {
+        std::cout << fmt::format("{} `{}` {} records [elapsed {}]{}", title, table, v.size(), e, spaces) << std::endl;
+      } else {
+        auto m = times.missing().isZero() ? "?" : times.missing().string();
+        std::cout << fmt::format("{} `{}` {}/{} [elapsed {}] [eta {}]\r", title, table, count, v.size(), e, m);
+      }
+    }
+    std::cout.flush();
+  };
   // copy records from source to destination
   if(!diff.onlySrcIndexes().empty()) {
-    LOG4CXX_DEBUG_FMT(log,
-                      "table `{}` copying missing records "
-                      "from source to destination",
-                      table,
-                      diff.onlySrcIndexes().size(),
-                      diff.commonIndexes().size(),
-                      diff.onlyDestIndexes().size());
     fromDb->selectPrepare(table, srcKeys.columnNames());
     toDb->insertPrepare(table);
-    count = 1;
+    count = 0;
     for(int i : diff.onlySrcIndexes()) {
-      std::cout << fmt::format("copying `{}` {}/{}\r", table, count, diff.onlySrcIndexes().size());
+      if(count % FEEDBACK == 0)
+        progress("copying", count + 1, diff.onlySrcIndexes(), false);
       srcRecord.clear();
       if(!fromDb->selectExecute(table, srcKeys.at(i), srcRecord)) {
         std::cout << std::endl
-                  << "select failed for " << srcKeys.at(i)->toString(srcKeys.columnNames()) << ' '
-                  << fromDb->lastError() << std::endl;
+                  << "select failed for " << srcKeys.at(i)->toString() << ' ' << fromDb->lastError() << std::endl;
         return false;
       }
       assert(srcRecord.size() == 1);
-      LOG4CXX_TRACE_FMT(log, "{}: {}", count, srcRecord.at(0)->toString(srcRecord.columnNames()));
+      LOG4CXX_TRACE_FMT(log, "insert {}: {}", count + 1, srcRecord.at(0)->toString());
       if(!config.dryRun && !toDb->insertExecute(table, srcRecord.at(0))) {
         std::cout << std::endl
-                  << "insert failed for " << srcKeys.at(i)->toString(srcKeys.columnNames()) << ' ' << toDb->lastError()
-                  << std::endl;
+                  << "insert failed for " << srcKeys.at(i)->toString() << ' ' << toDb->lastError() << std::endl;
         return false;
       }
       count++;
     }
-    auto times = timerGlobal.elapsed(--count);
-    std::cout << fmt::format("table `{}` copied {} records", table, count) << std::endl;
+    progress("copied", count, diff.onlySrcIndexes(), true);
   }
   // update records from source to destination
   if(config.update && !diff.updateIndexes().empty()) {
     fromDb->selectPrepare(table, srcKeys.columnNames());
-    count = 1;
+    count = 0;
     for(int i : diff.updateIndexes()) {
-      std::cout << fmt::format("updating `{}` {}/{}\r", table, count, diff.updateIndexes().size());
+      if(count % FEEDBACK == 0)
+        progress("updating", count + 1, diff.updateIndexes(), false);
       srcRecord.clear();
       if(!fromDb->selectExecute(table, srcKeys.at(i), srcRecord)) {
         std::cout << std::endl
-                  << "select failed for " << srcKeys.at(i)->toString(srcKeys.columnNames()) << ' '
-                  << fromDb->lastError() << std::endl;
+                  << "select failed for " << srcKeys.at(i)->toString() << ' ' << fromDb->lastError() << std::endl;
         return false;
       }
       assert(srcRecord.size() == 1);
-      if(count == 1)
+      if(count == 0)
         toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
-      LOG4CXX_TRACE_FMT(log, "{}: {}", count, srcRecord.at(0)->toString(srcRecord.columnNames()));
+      LOG4CXX_TRACE_FMT(log, "update {}: {}", count + 1, srcRecord.at(0)->toString());
       if(!config.dryRun && !toDb->updateExecute(table, srcRecord.at(0))) {
         std::cout << std::endl
-                  << "update failed for " << srcKeys.at(i)->toString(srcKeys.columnNames()) << ' ' << toDb->lastError()
-                  << std::endl;
+                  << "update failed for " << srcKeys.at(i)->toString() << ' ' << toDb->lastError() << std::endl;
         return false;
       }
       count++;
     }
-    auto times = timerGlobal.elapsed(--count);
-    std::cout << fmt::format("table `{}` updated {} records", table, count) << std::endl;
+    progress("updated", count, diff.updateIndexes(), true);
   }
   // remove records from destination
   if(config.mode == Mode::Sync && !diff.onlyDestIndexes().empty()) {
+    toDb->deletePrepare(table, srcKeys.columnNames());
+    count = 0;
     for(int i : diff.onlyDestIndexes()) {
-
-      // TODO
+      if(count % FEEDBACK == 0)
+        progress("deleting", count + 1, diff.onlyDestIndexes(), false);
+      LOG4CXX_TRACE_FMT(log, "delete {}: {}", count + 1, destKeys.at(i)->toString());
+      if(!config.dryRun && !toDb->deleteExecute(table, destKeys.at(i))) {
+        std::cout << std::endl
+                  << "delete failed for " << destKeys.at(i)->toString() << ' ' << toDb->lastError() << std::endl;
+        return false;
+      }
+      count++;
     }
-    auto times = timerGlobal.elapsed(--count);
+    progress("deleted", count, diff.onlyDestIndexes(), true);
   }
-  auto elapsed = timerGlobal.elapsed();
-  std::cout << std::format("table `{}` processed in {}", table, elapsed.elapsed().string()) << std::endl;
+  std::cout << std::format("table `{}` processed in {}", table, timer.elapsed().elapsed().string()) << std::endl;
   return true;
 }
 
@@ -297,13 +315,13 @@ void TableData::loadRow(const soci::row& row) {
       names.push_back(props.get_name());
     }
   }
-  rows.emplace_back(std::make_unique<TableRow>(row, updateCheck));
+  rows.emplace_back(std::make_unique<TableRow>(row, names, updateCheck));
 }
 
 /*****************************************************************************/
 
-TableRow::TableRow(const soci::row& row, bool uc)
-    : updateCheck{ uc } {
+TableRow::TableRow(const soci::row& row, const strings& n, bool uc)
+    : updateCheck{ uc }, names{ n } {
   fields.reserve(row.size());
   for(std::size_t i = 0; i != row.size(); ++i) {
     auto& props = row.get_properties(i);
@@ -335,7 +353,7 @@ void TableRow::rotate(const int moveCount) {
   std::rotate(fields.begin(), it, fields.end());
 }
 
-std::string TableRow::toString(const strings& names) const {
+std::string TableRow::toString() const {
   const int end = updateCheck ? fields.size() - 1 : fields.size();
   assert(names.size() == end);
   std::stringstream s;

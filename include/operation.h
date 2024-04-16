@@ -65,8 +65,6 @@ private:
   bool checkMetadataColumns(const std::string& table);
   bool execute(const std::string& table);
   std::string buildSqlKeys(const std::string& table) const;
-  util::Timer<> timerGlobal;
-  util::Timer<> timerTable;
 
 private:
   const OperationConfig& config;
@@ -79,7 +77,7 @@ private:
 
 class TableRow : public BaseData {
 public:
-  TableRow(const soci::row& row, bool updateCheck = false);
+  TableRow(const soci::row& row, const strings& names, bool updateCheck = false);
   TableRow(const TableRow&) = delete;
   TableRow(TableRow&&) = delete;
   TableRow& operator=(const TableRow&) = delete;
@@ -87,12 +85,13 @@ public:
   std::partial_ordering operator<=>(const TableRow& other) const;
   const bool hasUpdateCheck() const { return updateCheck; };
   const std::unique_ptr<Field>& at(int index) const { return fields.at(index); };
-  std::string toString(const strings& names) const;
+  std::string toString() const;
   size_t size() const { return fields.size(); }
   void rotate(const int moveCount);
 
 private:
   const bool updateCheck;
+  const strings& names;
   std::vector<std::unique_ptr<Field>> fields;
 };
 

@@ -21,6 +21,7 @@ public:
   using base = std::chrono::nanoseconds;
   Duration(D&& duration) noexcept
       : _duration{ std::move(duration) } {}
+  const bool isZero() const { return _duration.count() == 0; };
   const D& duration() const { return _duration; }
   const std::string& string() {
     static const std::pair<std::intmax_t, std::string> conv[6] = {
@@ -45,7 +46,7 @@ public:
         str << (str.tellp() > 0 ? " " : "") << integer << ' ' << conv[i].second;
     }
     if(str.tellp() == 0)
-      str << "0 " << conv[last].second;
+      str << "less than 1 " << conv[last].second;
     _string = str.str();
     return _string;
   }
@@ -76,9 +77,11 @@ private:
 
 template <IsDuration D = std::chrono::milliseconds> class Timer {
 public:
-  Timer() noexcept { start(); }
+  using elapsed_t = ProcessingTimes<D>;
 
-  void start(std::uint64_t expected = 0) {
+  Timer() noexcept { reset(); }
+
+  void reset(std::uint64_t expected = 0) {
     _begin = clock::now();
     _expected = expected;
     _processed = 0;

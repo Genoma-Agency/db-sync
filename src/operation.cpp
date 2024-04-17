@@ -268,7 +268,7 @@ bool Operation::execute(const std::string& table) {
     }
     progress("deleted", count, diff.onlyDestIndexes(), true);
   }
-  std::cout << std::format("table `{}` processed in {}", table, timer.elapsed().elapsed().string()) << std::endl;
+  std::cout << fmt::format("table `{}` processed in {}", table, timer.elapsed().elapsed().string()) << std::endl;
   return true;
 }
 

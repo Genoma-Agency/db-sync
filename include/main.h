@@ -24,9 +24,9 @@
 #include <boost/optional/optional_io.hpp>
 #include <cassert>
 #include <chrono>
+#include <fmt/chrono.h>
 #include <fmt/core.h>
 #include <fmt/ostream.h>
-#include <format>
 #include <iomanip>
 #include <iostream>
 #include <log4cxx/logger.h>

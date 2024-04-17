@@ -320,10 +320,7 @@ Field::Field(const soci::row& row, const std::size_t i)
   case soci::dt_date:
     std::tm tm = row.get<std::tm>(i);
     value.number.epoch = std::mktime(&tm);
-    std::chrono::system_clock::time_point tp{ std::chrono::seconds{ value.number.epoch } };
-    std::chrono::zoned_time zp{ std::chrono::current_zone(), tp };
-    value.string = std::format("{:%F %T}", zp);
-    value.string.resize(sizeof "yyyy-mm-dd hh:mm:ss" - 1);
+    value.string = fmt::format("{:%F %T}", tm);
     break;
   }
 }

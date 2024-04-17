@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.14)
 
-project(db-sync VERSION 0.1.0 LANGUAGES CXX)
+project(db-sync VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(SOCI REQUIRED COMPONENTS soci_core soci_mysql)
-find_package(Boost 1.81 REQUIRED COMPONENTS date_time program_options filesystem)
+find_package(Boost 1.75 REQUIRED COMPONENTS date_time program_options filesystem)
 find_package(log4cxx REQUIRED)
 find_package(fmt REQUIRED)
 

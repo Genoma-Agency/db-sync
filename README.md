@@ -1,10 +1,25 @@
 # db-sync
 
+Mysql/Mariadb records transfer utility.
+
+This application copy/sync records between databases.
+
+The selection of records to copy is made based on the primary key of the records.
+
 ## Warning
 
-### This application modifies database tables. Use with extreme caution and back up databases before running.
+#### This application modifies database tables content. 
 
-## Requiremens
+#### Use with extreme caution and back up databases before running.
+
+This application does not change the structure of the tables. 
+All tables in the source database must already be present and identical in the destination database.
+
+## Usage
+
+TODO
+
+## Requirements
 
 - C++20 compiler
 - soci mysql

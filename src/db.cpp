@@ -23,6 +23,18 @@ namespace dbsync {
 const std::string SQL_NULL_STRING{ (const char*)u8"∅" };
 const std::string SQL_MD5_CHECK{ "`#MD5@CHECK#`" };
 
+const std::string Db::SQL_TABLES{ R"#(
+select
+	table_name as "NAME"
+from
+	information_schema.tables c
+where
+  table_schema = :schema
+  and table_type = 'BASE TABLE'
+order by 1
+;
+)#" };
+
 const std::string Db::SQL_COLUMNS{ R"#(
 select
 	column_name as "NAME",
@@ -37,11 +49,12 @@ from
 	information_schema.columns c
 where
   table_schema = :schema 
-	and table_name = :tabella;
+	and table_name = :tabella
+;
 )#" };
 
 Db::Db(const std::string r)
-    : ref{ r }, log{ log4cxx::Logger::getLogger(LOG_DATA) } {}
+    : ref{ r }, log{ log4cxx::Logger::getLogger(LOG_DB) } {}
 
 Db::~Db() {
   if(session && session->is_connected()) {
@@ -73,15 +86,19 @@ bool Db::open(const std::string& h, int p, const std::string& s, const std::stri
   assert(!session);
   std::string connection = fmt::format("host={} port={} db={} user={} password={}", h, p, s, user, pwd);
   schema = s;
-  return apply(fmt::format("connect {}", connection),
-               [&connection, this] { session = std::make_unique<soci::session>(soci::mysql, connection); });
+  return apply(fmt::format("connect {}", connection), [&connection, this] {
+    std::cout << "connecting " << connection << std::endl;
+    session = std::make_unique<soci::session>(soci::mysql, connection);
+  });
 }
 
-bool Db::readMetadata() {
+bool Db::loadTables(strings& tables) {
+  return apply("load tables", [&] { *session << SQL_TABLES, soci::use(schema), soci::into(tables); });
+}
+
+bool Db::loadMetadata(std::set<std::string> tables) {
   return apply(
-      "metadata", [this] {
-        strings tables{ 1000 };
-        session->get_table_names(), soci::into(tables);
+      "metadata", [&] {
         std::string table;
         ColumnInfo ci;
         std::string isNullable;
@@ -93,8 +110,9 @@ bool Db::readMetadata() {
                                   soci::into(ci.type),
                                   soci::into(isNullable),
                                   soci::into(pk));
-        for(int i = 0; i < tables.size(); i++) {
-          table = tables[i];
+        for(auto& t : tables) {
+          table = t;
+          std::cout << fmt::format("{} `{}` ", ref, table) << std::flush;
           TableInfo ti;
           // row count
           *session << fmt::format("select count(*) from `{}`", table), soci::into(ti.rowCount);
@@ -107,6 +125,7 @@ bool Db::readMetadata() {
             } while(stInfo.fetch());
           }
           //
+          std::cout << ti.rowCount << " records" << std::endl;
           map.emplace(table, std::move(ti));
         }
       });
@@ -124,17 +143,23 @@ void Db::logTableInfo() const {
 
 bool Db::query(const std::string& sql, TableData& data) {
   return apply(sql, [&] {
+    LOG4CXX_TRACE(log, "query begin");
     soci::rowset<soci::row> rs = (session->prepare << sql);
+    LOG4CXX_TRACE(log, "query executed");
     for(auto it = rs.begin(); it != rs.end(); ++it)
       data.loadRow(*it);
+    LOG4CXX_TRACE(log, "query fetched");
   });
 }
 
 bool Db::query(const std::string& sql, std::function<void(const soci::row&)> consumer) {
   return apply(sql, [&] {
+    LOG4CXX_TRACE(log, "query begin");
     soci::rowset<soci::row> rs = (session->prepare << sql);
+    LOG4CXX_TRACE(log, "query executed");
     for(auto it = rs.begin(); it != rs.end(); ++it)
       consumer(*it);
+    LOG4CXX_TRACE(log, "query fetched");
   });
 }
 
@@ -207,27 +232,55 @@ bool Db::deleteExecute(const std::string& table, const std::unique_ptr<TableRow>
   });
 }
 
-bool Db::selectPrepare(const std::string& table, const strings& keys) {
+bool Db::selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk) {
+  assert(bulk > 0);
+  assert(keys.size() > 0);
   keysCount = keys.size();
-  assert(keysCount > 0);
+  readCount = bulk;
   std::stringstream s;
-  s << "SELECT * FROM `" << table << "` WHERE `" << keys[0] << "`=:v0";
+  s << "SELECT * FROM `" << table << "` WHERE (`" << keys[0] << '`';
   for(int i = 1; i < keysCount; i++)
-    s << " AND `" << keys[i] << "`=:v" << i;
+    s << ",`" << keys[i] << '`';
+  s << ") IN (";
+  for(int b = 0; b < bulk; b++) {
+    if(b > 0)
+      s << ',';
+    s << "(:k0_" << b;
+    for(int i = 1; i < keysCount; i++)
+      s << ",:k" << i << '_' << b;
+    s << ')';
+  }
+  s << ')';
   std::string sql = s.str();
   return apply(sql, [&] { stmtRead = (session->prepare << sql); });
 }
 
-bool Db::selectExecute(const std::string& table, const std::unique_ptr<TableRow>& row, TableData& into) {
+bool Db::selectExecute(const std::string& table,
+                       const TableData& keys,
+                       std::vector<int>::iterator& from,
+                       std::vector<int>::iterator end,
+                       TableData& into) {
+  static const std::unique_ptr<TableRow> emptyRow;
   assert(stmtRead.has_value());
   return apply("exec prepared select", [&] {
-    bind(stmtRead, row, 0, keysCount);
+    LOG4CXX_TRACE(log, "select execute begin");
+    int count = 0;
+    while(count < readCount && from != end) {
+      bind(stmtRead, keys.at(*from), 0, keysCount);
+      from++;
+      count++;
+    }
+    for(; count < readCount; count++)
+      bind(stmtRead, emptyRow, 0, keysCount);
     stmtRead->exchange_for_rowset(soci::into(rowSelect));
+    LOG4CXX_TRACE(log, "select execute before query");
     stmtRead->execute(false);
+    LOG4CXX_TRACE(log, "select execute query executed");
     soci::rowset_iterator<soci::row> it(*stmtRead, rowSelect);
     soci::rowset_iterator<soci::row> end;
     for(; it != end; ++it)
       into.loadRow(rowSelect);
+    LOG4CXX_TRACE(log, "select execute fetch done");
     stmtRead->bind_clean_up();
   });
 }
@@ -236,49 +289,55 @@ void Db::bind(std::optional<soci::statement>& stmt,
               const std::unique_ptr<TableRow>& row,
               const int startIndex,
               const int endIndex) {
+  static soci::indicator nullIndicator = soci::i_null;
   static std::string nullString;
+  /*
   static double nullDouble = 0;
   static int nullInt = 0;
   static long long nullLongLong = 0;
   static unsigned long long nullULongLong = 0;
-  static soci::indicator nullIndicator = soci::i_null;
+  */
   assert(startIndex < endIndex);
   assert(stmt.has_value());
   for(int i = startIndex; i < endIndex; i++) {
-    switch(row->at(i)->type()) {
-    case soci::dt_string:
-    case soci::dt_xml:
-    case soci::dt_blob:
-    case soci::dt_date:
-      if(row->at(i)->isNull())
-        stmt->exchange(soci::use(nullString, nullIndicator));
-      else
+    if(!row || row->at(i)->isNull()) {
+      stmt->exchange(soci::use(nullString, nullIndicator));
+    } else {
+      switch(row->at(i)->type()) {
+      case soci::dt_string:
+      case soci::dt_xml:
+      case soci::dt_blob:
+      case soci::dt_date:
+        // if(row->at(i)->isNull())
+        //   stmt->exchange(soci::use(nullString, nullIndicator));
+        // else
         stmt->exchange(soci::use(row->at(i)->asString()));
-      break;
-    case soci::dt_double:
-      if(row->at(i)->isNull())
-        stmt->exchange(soci::use(nullDouble, nullIndicator));
-      else
+        break;
+      case soci::dt_double:
+        // if(row->at(i)->isNull())
+        //   stmt->exchange(soci::use(nullDouble, nullIndicator));
+        // else
         stmt->exchange(soci::use(row->at(i)->asDouble()));
-      break;
-    case soci::dt_integer:
-      if(row->at(i)->isNull())
-        stmt->exchange(soci::use(nullInt, nullIndicator));
-      else
+        break;
+      case soci::dt_integer:
+        // if(row->at(i)->isNull())
+        //   stmt->exchange(soci::use(nullInt, nullIndicator));
+        // else
         stmt->exchange(soci::use(row->at(i)->asInt()));
-      break;
-    case soci::dt_long_long:
-      if(row->at(i)->isNull())
-        stmt->exchange(soci::use(nullLongLong, nullIndicator));
-      else
+        break;
+      case soci::dt_long_long:
+        // if(row->at(i)->isNull())
+        //   stmt->exchange(soci::use(nullLongLong, nullIndicator));
+        // else
         stmt->exchange(soci::use(row->at(i)->asLongLong()));
-      break;
-    case soci::dt_unsigned_long_long:
-      if(row->at(i)->isNull())
-        stmt->exchange(soci::use(nullULongLong, nullIndicator));
-      else
+        break;
+      case soci::dt_unsigned_long_long:
+        // if(row->at(i)->isNull())
+        //   stmt->exchange(soci::use(nullULongLong, nullIndicator));
+        // else
         stmt->exchange(soci::use(row->at(i)->asULongLong()));
-      break;
+        break;
+      }
     }
   }
   stmt->define_and_bind();
@@ -291,46 +350,55 @@ Field::Field(const soci::row& row, const std::size_t i)
   auto props = row.get_properties(i);
   dType = props.get_data_type();
   dIndicator = row.get_indicator(i);
-  if(dIndicator == soci::i_null) {
-    value.string = SQL_NULL_STRING;
+  if(dIndicator == soci::i_null)
     return;
-  }
   switch(dType) {
   case soci::dt_string:
   case soci::dt_xml:
   case soci::dt_blob:
     value.string = row.get<std::string>(i);
     break;
-  case soci::dt_double:
-    value.number.decimal = row.get<double>(i);
-    value.string = std::to_string(row.get<double>(i));
-    break;
-  case soci::dt_integer:
-    value.number.integer = row.get<int>(i);
-    value.string = std::to_string(row.get<int>(i));
-    break;
-  case soci::dt_long_long:
-    value.number.longLong = row.get<long long>(i);
-    value.string = std::to_string(row.get<long long>(i));
-    break;
-  case soci::dt_unsigned_long_long:
-    value.number.uLongLong = row.get<unsigned long long>(i);
-    value.string = std::to_string(row.get<unsigned long long>(i));
-    break;
-  case soci::dt_date:
+  case soci::dt_date: {
     std::tm tm = row.get<std::tm>(i);
     value.number.epoch = std::mktime(&tm);
     value.string = fmt::format("{:%F %T}", tm);
+  } break;
+  case soci::dt_double:
+    value.number.decimal = row.get<double>(i);
+    break;
+  case soci::dt_integer:
+    value.number.integer = row.get<int>(i);
+    break;
+  case soci::dt_long_long:
+    value.number.longLong = row.get<long long>(i);
+    break;
+  case soci::dt_unsigned_long_long:
+    value.number.uLongLong = row.get<unsigned long long>(i);
     break;
   }
 }
 
-/*
-    static const partial_ordering less;
-    static const partial_ordering equivalent;
-    static const partial_ordering greater;
-    static const partial_ordering unordered;
-*/
+const std::string Field::toString() const {
+  if(dIndicator == soci::i_null)
+    return SQL_NULL_STRING;
+  switch(dType) {
+  case soci::dt_string:
+  case soci::dt_xml:
+  case soci::dt_blob:
+  case soci::dt_date:
+    return value.string;
+  case soci::dt_double:
+    return std::to_string(value.number.decimal);
+  case soci::dt_integer:
+    return std::to_string(value.number.integer);
+  case soci::dt_long_long:
+    return std::to_string(value.number.longLong);
+  case soci::dt_unsigned_long_long:
+    return std::to_string(value.number.uLongLong);
+  }
+  return "?";
+}
+
 std::partial_ordering Field::operator<=>(const Field& other) const {
   std::partial_ordering comp = std::partial_ordering::unordered;
   if(dType == other.dType) {
@@ -346,8 +414,9 @@ std::partial_ordering Field::operator<=>(const Field& other) const {
       case soci::dt_string:
       case soci::dt_xml:
       case soci::dt_blob:
-      case soci::dt_date:
         return value.string <=> other.value.string;
+      case soci::dt_date:
+        return value.number.epoch <=> other.value.number.epoch;
       case soci::dt_double:
         return value.number.decimal <=> other.value.number.decimal;
       case soci::dt_integer:

@@ -69,6 +69,8 @@ const po::options_description OPTIONS = [] {
 
 po::variables_map params;
 
+const int MAX_TABLE = 1000;
+
 int main(int argc, char* argv[]) {
   std::setlocale(LC_ALL, "en_US.UTF-8");
   try {
@@ -82,7 +84,7 @@ int main(int argc, char* argv[]) {
 
   size_t check = params.count("help") + params.count("version") + params.count("copy") + params.count("sync");
   if(check > 1) {
-    std::cerr << "Only one command argument allowed [help|version|copy|sync]" << std::endl;
+    std::cerr << "only one command argument allowed [help|version|copy|sync]" << std::endl;
     return 2;
   }
 
@@ -100,13 +102,13 @@ int main(int argc, char* argv[]) {
   bool xml = false;
   if(logConfig) {
     if(!bf::exists(*logConfig)) {
-      std::cerr << "Logger configuration file not found: " << *logConfig << std::endl;
+      std::cerr << "logger configuration file not found: " << *logConfig << std::endl;
     } else if(!bf::is_regular_file(*logConfig)) {
-      std::cerr << "Logger configuration file is not a regular file: " << *logConfig << std::endl;
+      std::cerr << "logger configuration file is not a regular file: " << *logConfig << std::endl;
     } else {
       auto logStatus = log4cxx::xml::DOMConfigurator::configure(*logConfig);
       if(logStatus == log4cxx::spi::ConfigurationStatus::NotConfigured)
-        std::cerr << "Error initializing logger configuration (please check logger xml configuration file): "
+        std::cerr << "error initializing logger configuration (please check logger xml configuration file): "
                   << *logConfig << std::endl;
       else
         xml = true;
@@ -117,39 +119,39 @@ int main(int argc, char* argv[]) {
 
   // configure source db
   if(!fromHost || !fromUser || !fromPwd || !fromSchema) {
-    std::cerr << "All source arguments must be provided: fromHost, fromUser, fromPwd, fromSchema" << std::endl;
+    std::cerr << "all source arguments must be provided: fromHost, fromUser, fromPwd, fromSchema" << std::endl;
     return 10;
   }
   std::unique_ptr<dbsync::Db> fromDb = std::make_unique<dbsync::Db>("source");
   if(!fromDb->open(*fromHost, *fromPort, *fromSchema, *fromUser, *fromPwd)) {
-    std::cerr << "Source db connection error, see log file for details" << std::endl;
+    std::cerr << "source db connection error, see log file for details" << std::endl;
     return 11;
   }
-  if(!fromDb->readMetadata()) {
-    std::cerr << "Source db metadata error, see log file for details" << std::endl;
-    return 22;
+  dbsync::strings fromTables{ MAX_TABLE };
+  if(!fromDb->loadTables(fromTables)) {
+    std::cerr << "source db load tables error, see log file for details" << std::endl;
+    return 12;
   }
-  fromDb->logTableInfo();
 
   // configure target db
   if(!toHost || !toUser || !toPwd || !toSchema) {
-    std::cerr << "All target arguments must be provided: toHost, toUser, toPwd, toSchema" << std::endl;
+    std::cerr << "all target arguments must be provided: toHost, toUser, toPwd, toSchema" << std::endl;
     return 20;
   }
   std::unique_ptr<dbsync::Db> toDb = std::make_unique<dbsync::Db>("target");
   if(!toDb->open(*toHost, *toPort, *toSchema, *toUser, *toPwd)) {
-    std::cerr << "Target db connection error, see log file for details" << std::endl;
+    std::cerr << "target db connection error, see log file for details" << std::endl;
     return 21;
   }
-  if(!toDb->readMetadata()) {
-    std::cerr << "Target db metadata error, see log file for details" << std::endl;
+  dbsync::strings toTables{ MAX_TABLE };
+  if(!toDb->loadTables(fromTables)) {
+    std::cerr << "source db load tables error, see log file for details" << std::endl;
     return 22;
   }
-  toDb->logTableInfo();
 
   std::cout << "source and target database ready" << std::endl;
 
-  // ordino ed elimino diplucati da tables
+  // sort and unique argument tables
   std::sort(tables.begin(), tables.end());
   auto duplicates = std::unique(tables.begin(), tables.end());
   tables.erase(duplicates, tables.end());
@@ -163,9 +165,14 @@ int main(int argc, char* argv[]) {
   std::unique_ptr<dbsync::Operation> op
       = std::make_unique<dbsync::Operation>(config, std::move(fromDb), std::move(toDb));
 
-  if(!op->checkMetadata()) {
-    std::cerr << "Metadata check failed" << std::endl;
+  if(!op->checkTables(fromTables, toTables)) {
+    std::cerr << "tables check failed" << std::endl;
     return 30;
+  }
+
+  if(!op->checkMetadata()) {
+    std::cerr << "metadata check failed" << std::endl;
+    return 31;
   }
 
   if(!op->preExecute()) {
@@ -192,6 +199,6 @@ namespace dbsync {
 // log categories
 const char* LOG_MAIN = "main";
 const char* LOG_DB = "db";
-const char* LOG_EXEC = "exec";
+const char* LOG_OPERATION = "exec";
 const char* LOG_DATA = "data";
 }

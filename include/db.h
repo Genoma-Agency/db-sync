@@ -63,6 +63,7 @@ public:
   const soci::indicator& indicator() const { return dIndicator; };
   bool isString() const { return dType == soci::dt_string || dType == soci::dt_xml || dType == soci::dt_blob; }
   bool isNull() const { return dIndicator == soci::i_null; }
+  const std::string toString() const;
   const std::string& asString() const { return value.string; };
   const double& asDouble() const { return value.number.decimal; };
   const int& asInt() const { return value.number.integer; };
@@ -96,7 +97,8 @@ public:
   ~Db();
   bool
   open(const std::string& host, int port, const std::string& schema, const std::string& user, const std::string& pwd);
-  bool readMetadata();
+  bool loadTables(strings& tables);
+  bool loadMetadata(std::set<std::string> tables);
   const std::string& reference() const { return ref; }
   const std::string& lastError() const { return error; }
   const MetadataMap& metadata() const { return map; };
@@ -110,8 +112,12 @@ public:
   bool updateExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
   bool deletePrepare(const std::string& table, const strings& keys);
   bool deleteExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
-  bool selectPrepare(const std::string& table, const strings& keys);
-  bool selectExecute(const std::string& table, const std::unique_ptr<TableRow>& row, TableData& into);
+  bool selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk);
+  bool selectExecute(const std::string& table,
+                     const TableData& keys,
+                     std::vector<int>::iterator& from,
+                     std::vector<int>::iterator end,
+                     TableData& into);
   soci::details::session_backend* backend() { return session->get_backend(); };
 
 private:
@@ -128,12 +134,14 @@ private:
   log4cxx::LoggerPtr log;
   std::string schema;
   std::optional<soci::statement> stmtRead;
+  std::size_t readCount;
   std::optional<soci::statement> stmtWrite;
   int keysCount;
   soci::row rowSelect;
   std::string error;
 
 private:
+  static const std::string SQL_TABLES;
   static const std::string SQL_COLUMNS;
 };
 }

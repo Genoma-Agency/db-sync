@@ -43,7 +43,7 @@ public:
       integer = fraction / conv[i].first;
       fraction = fraction % conv[i].first;
       if(integer > 0)
-        str << (str.tellp() > 0 ? " " : "") << integer << ' ' << conv[i].second;
+        str << (str.tellp() > 0 ? " " : "") << integer << conv[i].second;
     }
     if(str.tellp() == 0)
       str << "less than 1 " << conv[last].second;

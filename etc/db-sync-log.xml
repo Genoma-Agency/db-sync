@@ -34,7 +34,7 @@
     </logger>
 
     <logger name="data" >
-        <priority value="trace"/>
+        <priority value="debug"/>
     </logger>
 
 </log4j:configuration>

@@ -87,6 +87,7 @@ private:
 
 /*****************************************************************************/
 
+class TableKeys;
 class TableData;
 class TableRow;
 
@@ -111,10 +112,10 @@ public:
   bool updatePrepare(const std::string& table, const strings& keys, const strings& fields);
   bool updateExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
   bool deletePrepare(const std::string& table, const strings& keys);
-  bool deleteExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
+  bool deleteExecute(const std::string& table, const TableKeys& keys, long index);
   bool selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk);
   bool selectExecute(const std::string& table,
-                     const TableData& keys,
+                     const TableKeys& keys,
                      std::vector<int>::iterator& from,
                      std::vector<int>::iterator end,
                      TableData& into);

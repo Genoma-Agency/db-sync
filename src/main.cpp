@@ -47,6 +47,7 @@ const po::options_description OPTIONS = [] {
   options.add_options()("sync,s", "sync records from source to target");
   options.add_options()("dry-run,d", "execute without modifying the target database");
   options.add_options()("update", "enable update of records from source to target");
+  options.add_options()("nofail", "don't stop if error on destination records");
   options.add_options()("disablebinlog", "disable binary log (privilege required)");
   options.add_options()("fromHost", po::value<>(&fromHost), "source database host IP or name");
   options.add_options()("fromPort", po::value<>(&fromPort)->default_value(3306), "source database port");
@@ -160,7 +161,8 @@ int main(int argc, char* argv[]) {
                                   .update = params.count("update") > 0,
                                   .dryRun = params.count("dry-run") > 0,
                                   .tables = tables,
-                                  .disableBinLog = params.count("disablebinlog") > 0 };
+                                  .disableBinLog = params.count("disablebinlog") > 0,
+                                  .noFail = params.count("nofail") > 0 };
 
   std::unique_ptr<dbsync::Operation> op
       = std::make_unique<dbsync::Operation>(config, std::move(fromDb), std::move(toDb));

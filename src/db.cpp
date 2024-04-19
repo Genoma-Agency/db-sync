@@ -16,6 +16,7 @@
  */
 
 #include <db.h>
+#include <keys.h>
 #include <operation.h>
 
 namespace dbsync {
@@ -223,10 +224,10 @@ bool Db::deletePrepare(const std::string& table, const strings& keys) {
   return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
 }
 
-bool Db::deleteExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
+bool Db::deleteExecute(const std::string& table, const TableKeys& keys, long index) {
   assert(stmtWrite.has_value());
   return apply("exec prepared delete", [&] {
-    bind(stmtWrite, row, 0, keysCount);
+    keys.bind(*stmtWrite, index);
     stmtWrite->execute(true);
     stmtWrite->bind_clean_up();
   });
@@ -256,7 +257,7 @@ bool Db::selectPrepare(const std::string& table, const strings& keys, const std:
 }
 
 bool Db::selectExecute(const std::string& table,
-                       const TableData& keys,
+                       const TableKeys& keys,
                        std::vector<int>::iterator& from,
                        std::vector<int>::iterator end,
                        TableData& into) {
@@ -266,7 +267,7 @@ bool Db::selectExecute(const std::string& table,
     LOG4CXX_TRACE(log, "select execute begin");
     int count = 0;
     while(count < readCount && from != end) {
-      bind(stmtRead, keys.at(*from), 0, keysCount);
+      keys.bind(*stmtRead, *from);
       from++;
       count++;
     }
@@ -291,12 +292,6 @@ void Db::bind(std::optional<soci::statement>& stmt,
               const int endIndex) {
   static soci::indicator nullIndicator = soci::i_null;
   static std::string nullString;
-  /*
-  static double nullDouble = 0;
-  static int nullInt = 0;
-  static long long nullLongLong = 0;
-  static unsigned long long nullULongLong = 0;
-  */
   assert(startIndex < endIndex);
   assert(stmt.has_value());
   for(int i = startIndex; i < endIndex; i++) {
@@ -308,33 +303,18 @@ void Db::bind(std::optional<soci::statement>& stmt,
       case soci::dt_xml:
       case soci::dt_blob:
       case soci::dt_date:
-        // if(row->at(i)->isNull())
-        //   stmt->exchange(soci::use(nullString, nullIndicator));
-        // else
         stmt->exchange(soci::use(row->at(i)->asString()));
         break;
       case soci::dt_double:
-        // if(row->at(i)->isNull())
-        //   stmt->exchange(soci::use(nullDouble, nullIndicator));
-        // else
         stmt->exchange(soci::use(row->at(i)->asDouble()));
         break;
       case soci::dt_integer:
-        // if(row->at(i)->isNull())
-        //   stmt->exchange(soci::use(nullInt, nullIndicator));
-        // else
         stmt->exchange(soci::use(row->at(i)->asInt()));
         break;
       case soci::dt_long_long:
-        // if(row->at(i)->isNull())
-        //   stmt->exchange(soci::use(nullLongLong, nullIndicator));
-        // else
         stmt->exchange(soci::use(row->at(i)->asLongLong()));
         break;
       case soci::dt_unsigned_long_long:
-        // if(row->at(i)->isNull())
-        //   stmt->exchange(soci::use(nullULongLong, nullIndicator));
-        // else
         stmt->exchange(soci::use(row->at(i)->asULongLong()));
         break;
       }

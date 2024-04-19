@@ -35,6 +35,7 @@ struct OperationConfig {
   bool dryRun;
   strings& tables;
   bool disableBinLog;
+  bool noFail;
 };
 
 std::ostream& operator<<(std::ostream& stream, const OperationConfig& var);
@@ -116,9 +117,11 @@ private:
 
 /*****************************************************************************/
 
+class TableKeys;
+
 class TableDiff {
 public:
-  TableDiff(TableData& src, TableData& dest) noexcept;
+  TableDiff(TableKeys& src, TableKeys& dest) noexcept;
   void logResult(const std::string& table) const;
   std::vector<int>& onlySrcIndexes() { return onlySrc; };
   std::vector<int>& commonIndexes() { return common; };
@@ -126,8 +129,8 @@ public:
   std::vector<int>& onlyDestIndexes() { return onlyDest; };
 
 private:
-  const TableData& src;
-  const TableData& dest;
+  const TableKeys& src;
+  const TableKeys& dest;
   std::vector<int> onlySrc;
   std::vector<int> common;
   std::vector<int> update;

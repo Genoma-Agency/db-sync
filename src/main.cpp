@@ -198,6 +198,36 @@ int main(int argc, char* argv[]) {
 
 namespace dbsync {
 
+void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size, bool endl) {
+  static const std::string& ER = util::term::sequence::eraseRight;
+  if(count == 0) {
+    if(size > 0)
+      std::cout << fmt::format("begin {} `{}` {} records\r", t, table, size);
+    else
+      std::cout << fmt::format("begin {} `{}`\r", t, table);
+  } else {
+    auto times = timer.elapsed(count + 1);
+    auto s = times.speed<std::chrono::minutes>();
+    auto e = times.elapsed().string();
+    if(endl) {
+      if(size > 0)
+        std::cout << fmt::format("{} `{}` {} records [{:.1f} rows/min] [elapsed {}]{}", t, table, size, s, e, ER)
+                  << std::endl;
+      else
+        std::cout << fmt::format("{} `{}` [{:.1f} rows/min] [elapsed {}]{}", t, table, s, e, ER) << std::endl;
+    } else {
+      auto m = times.missing().isZero() ? "?" : times.missing().string();
+      if(size > 0)
+        std::cout << fmt::format(
+            "{} `{}` {}/{} [{:.1f} rows/min] [elapsed {}] [eta {}]{}\r", t, table, count, size, s, e, m, ER);
+      else
+        std::cout << fmt::format(
+            "{} `{}` {} [{:.1f} rows/min] [elapsed {}] [eta {}]{}\r", t, table, count, s, e, m, ER);
+    }
+  }
+  std::cout << std::flush;
+};
+
 // log categories
 const char* LOG_MAIN = "main";
 const char* LOG_DB = "db";

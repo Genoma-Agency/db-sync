@@ -2,8 +2,52 @@
 
 #include <chrono>
 #include <string>
+#include <sys/resource.h>
 
 namespace util {
+
+namespace memory {
+
+namespace literal {
+
+constexpr std::size_t operator""_Kb(unsigned long long int x) { return 1024ULL * x; }
+constexpr std::size_t operator""_Mb(unsigned long long int x) { return 1024_Kb * x; }
+constexpr std::size_t operator""_Gb(unsigned long long int x) { return 1024_Mb * x; }
+constexpr std::size_t operator""_Tb(unsigned long long int x) { return 1024_Gb * x; }
+constexpr std::size_t operator""_Pb(unsigned long long int x) { return 1024_Tb * x; }
+
+}
+}
+
+namespace proc {
+using namespace util::memory::literal;
+/*****************************************************************************/
+/* process information                                                       */
+/*****************************************************************************/
+struct mem_info {
+  std::size_t vss;
+  std::size_t rss;
+  std::size_t shared;
+  std::size_t text;
+  std::size_t lib;
+  std::size_t data;
+  std::size_t dirty;
+};
+
+mem_info memoryInfo(std::size_t kb);
+
+std::string memoryString();
+
+std::size_t memoryUsageKb();
+double memoryUsageMb();
+double memoryUsageGb();
+std::string memoryUsage();
+
+std::size_t maxMemoryUsageKb();
+double maxMemoryUsageMb();
+double maxMemoryUsageGb();
+std::string maxMemoryUsage();
+}
 
 namespace term {
 /*****************************************************************************/
@@ -125,29 +169,24 @@ template <IsDuration D = std::chrono::milliseconds> class Timer {
 public:
   using elapsed_t = ProcessingTimes<D>;
 
-  Timer() noexcept { reset(); }
+  Timer(std::uint64_t expected = 0) noexcept { reset(expected); }
 
   void reset(std::uint64_t expected = 0) {
     _begin = clock::now();
     _expected = expected;
-    _processed = 0;
   }
 
-  void expected(std::uint64_t expected) { _expected = expected; }
-
   ProcessingTimes<D> elapsed(std::uint64_t processed = 0) {
-    _processed += processed;
     D elapsed = std::chrono::duration_cast<D>(clock::now() - _begin);
     std::uint64_t total = 0;
     if(processed > 0 && _expected > 0)
       total = (double)_expected / (double)processed * elapsed.count();
-    return ProcessingTimes{ _processed, std::move(elapsed), std::move(D{ total }) };
+    return ProcessingTimes{ processed, std::move(elapsed), std::move(D{ total }) };
   }
 
 private:
   time_point _begin;
   std::uint64_t _expected;
-  std::uint64_t _processed;
 };
 
 }

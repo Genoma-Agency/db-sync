@@ -24,6 +24,8 @@ namespace dbsync {
 const std::string SQL_NULL_STRING{ (const char*)u8"∅" };
 const std::string SQL_MD5_CHECK{ "`#MD5@CHECK#`" };
 
+const int QUERY_PAGINATION = 100000;
+
 const std::string Db::SQL_TABLES{ R"#(
 select
 	table_name as "NAME"
@@ -64,20 +66,28 @@ Db::~Db() {
   }
 }
 
+void Db::transactionBegin() { tx.emplace(*session); }
+
+void Db::transactionCommit() {
+  assert(tx.has_value());
+  tx->commit();
+}
+
 bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda) {
   try {
-    LOG4CXX_DEBUG(log, opDesc);
+    LOG4CXX_DEBUG_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, util::proc::memoryUsage());
     lambda();
+    LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, util::proc::memoryUsage());
     error.clear();
     return true;
   } catch(soci::mysql_soci_error const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> {} error [{}]: {}", ref, opDesc, e.err_num_, e.what());
+    LOG4CXX_ERROR_FMT(log, "<{}> [{}] error [{}]: {}", ref, opDesc, e.err_num_, e.what());
     error = fmt::format("[{}]: {}", e.err_num_, e.what());
   } catch(soci::soci_error const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> {} error: {}", ref, opDesc, e.what());
+    LOG4CXX_ERROR_FMT(log, "<{}> [{}] error: {}", ref, opDesc, e.what());
     error = e.what();
   } catch(std::exception const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> {} fault: {}", ref, opDesc, e.what());
+    LOG4CXX_ERROR_FMT(log, "<{}> [{}] fault: {}", ref, opDesc, e.what());
     error = e.what();
   }
   return false;
@@ -113,10 +123,7 @@ bool Db::loadMetadata(std::set<std::string> tables) {
                                   soci::into(pk));
         for(auto& t : tables) {
           table = t;
-          std::cout << fmt::format("{} `{}` ", ref, table) << std::flush;
           TableInfo ti;
-          // row count
-          *session << fmt::format("select count(*) from `{}`", table), soci::into(ti.rowCount);
           // columns
           if(stInfo.execute(true)) {
             do {
@@ -126,7 +133,7 @@ bool Db::loadMetadata(std::set<std::string> tables) {
             } while(stInfo.fetch());
           }
           //
-          std::cout << ti.rowCount << " records" << std::endl;
+          std::cout << fmt::format("{} `{}` ", ref, table) << std::endl;
           map.emplace(table, std::move(ti));
         }
       });
@@ -142,25 +149,50 @@ void Db::logTableInfo() const {
   }
 }
 
+bool Db::load(bool source, const std::string& table, TableKeys& data) {
+  auto tm = metadata().at(table);
+  strings pk;
+  strings fields;
+  for(int i = 0; i < tm.columns.size(); i++) {
+    if(tm.columns[i].primaryKey) {
+      pk.push_back(fmt::format("`{}`", tm.columns[i].name));
+    } else if(data.hasUpdateCheck()) {
+      fields.push_back(fmt::format("COALESCE(`{}`,'{}')", tm.columns[i].name, SQL_NULL_STRING));
+    }
+  }
+  std::stringstream sqlKeys;
+  std::stringstream sqlWhere;
+  sqlKeys << "SELECT " << ba::join(pk, ",");
+  if(data.hasUpdateCheck())
+    sqlKeys << ",MD5(CONCAT(" << ba::join(fields, ",") << ")) AS " << SQL_MD5_CHECK;
+  sqlKeys << " FROM `" << table << '`';
+  std::string select = sqlKeys.str();
+  TimerMs timer;
+  bool ok = true;
+  int loaded = QUERY_PAGINATION;
+  while(ok && loaded == QUERY_PAGINATION) {
+    progress(table, timer, "key loading", data.size());
+    std::string sql = fmt::format("{} LIMIT {} OFFSET {}", select, QUERY_PAGINATION, data.size());
+    loaded = 0;
+    ok = query(sql, [&](const soci::row& row) {
+      data.loadRow(row);
+      loaded++;
+    });
+  };
+  progress(table, timer, "key loaded", data.size(), data.size(), true);
+  LOG4CXX_TRACE_FMT(log, "load done [RSS: {}]", util::proc::memoryUsage());
+  return ok;
+};
+
 bool Db::query(const std::string& sql, TableData& data) {
-  return apply(sql, [&] {
-    LOG4CXX_TRACE(log, "query begin");
-    soci::rowset<soci::row> rs = (session->prepare << sql);
-    LOG4CXX_TRACE(log, "query executed");
-    for(auto it = rs.begin(); it != rs.end(); ++it)
-      data.loadRow(*it);
-    LOG4CXX_TRACE(log, "query fetched");
-  });
+  return query(sql, [&](const soci::row& row) { data.loadRow(row); });
 }
 
 bool Db::query(const std::string& sql, std::function<void(const soci::row&)> consumer) {
   return apply(sql, [&] {
-    LOG4CXX_TRACE(log, "query begin");
     soci::rowset<soci::row> rs = (session->prepare << sql);
-    LOG4CXX_TRACE(log, "query executed");
     for(auto it = rs.begin(); it != rs.end(); ++it)
       consumer(*it);
-    LOG4CXX_TRACE(log, "query fetched");
   });
 }
 
@@ -182,6 +214,7 @@ bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>
   assert(map.at(table).columns.size() == row->size());
   assert(stmtWrite.has_value());
   return apply("exec prepared insert", [&] {
+    LOG4CXX_TRACE_FMT(log, "insert bind {}", row->toString());
     bind(stmtWrite, row, 0, row->size());
     stmtWrite->execute(true);
     stmtWrite->bind_clean_up();
@@ -207,6 +240,7 @@ bool Db::updateExecute(const std::string& table, const std::unique_ptr<TableRow>
   assert(stmtWrite.has_value());
   row->rotate(keysCount);
   return apply("exec prepared update", [&] {
+    LOG4CXX_TRACE_FMT(log, "update bind {}", row->toString());
     bind(stmtWrite, row, 0, row->size());
     stmtWrite->execute(true);
     stmtWrite->bind_clean_up();
@@ -227,6 +261,7 @@ bool Db::deletePrepare(const std::string& table, const strings& keys) {
 bool Db::deleteExecute(const std::string& table, const TableKeys& keys, long index) {
   assert(stmtWrite.has_value());
   return apply("exec prepared delete", [&] {
+    LOG4CXX_TRACE_FMT(log, "delete bind [{}] {}", index, keys.rowString(index));
     keys.bind(*stmtWrite, index);
     stmtWrite->execute(true);
     stmtWrite->bind_clean_up();
@@ -264,24 +299,22 @@ bool Db::selectExecute(const std::string& table,
   static const std::unique_ptr<TableRow> emptyRow;
   assert(stmtRead.has_value());
   return apply("exec prepared select", [&] {
-    LOG4CXX_TRACE(log, "select execute begin");
     int count = 0;
     while(count < readCount && from != end) {
+      LOG4CXX_TRACE_FMT(log, "select bind [{}] {}", *from, keys.rowString(*from));
       keys.bind(*stmtRead, *from);
       from++;
       count++;
     }
     for(; count < readCount; count++)
       bind(stmtRead, emptyRow, 0, keysCount);
-    stmtRead->exchange_for_rowset(soci::into(rowSelect));
-    LOG4CXX_TRACE(log, "select execute before query");
+    soci::row row;
+    stmtRead->exchange_for_rowset(soci::into(row));
     stmtRead->execute(false);
-    LOG4CXX_TRACE(log, "select execute query executed");
-    soci::rowset_iterator<soci::row> it(*stmtRead, rowSelect);
+    soci::rowset_iterator<soci::row> it(*stmtRead, row);
     soci::rowset_iterator<soci::row> end;
     for(; it != end; ++it)
-      into.loadRow(rowSelect);
-    LOG4CXX_TRACE(log, "select execute fetch done");
+      into.loadRow(row);
     stmtRead->bind_clean_up();
   });
 }
@@ -413,7 +446,7 @@ std::partial_ordering Field::operator<=>(const Field& other) const {
 /*****************************************************************************/
 
 std::ostream& operator<<(std::ostream& stream, const TableInfo& var) {
-  return stream << "[rows: " << var.rowCount << "] [columns: " << var.columns.size() << "]";
+  return stream << "[columns: " << var.columns.size() << "]";
 }
 
 std::ostream& operator<<(std::ostream& stream, const ColumnInfo& var) {
@@ -462,5 +495,37 @@ std::ostream& operator<<(std::ostream& stream, const indicator& var) {
     return stream << "i_truncated";
   }
   return stream << "unknown indicator " << (int)var;
+}
+
+std::ostream& operator<<(std::ostream& stream, const row& var) {
+  for(std::size_t i = 0; i < var.size(); ++i) {
+    auto dType = var.get_properties(i).get_data_type();
+    stream << '`' << var.get_properties(i).get_name() << " [";
+    switch(dType) {
+    case soci::dt_string:
+    case soci::dt_xml:
+    case soci::dt_blob:
+      stream << var.get<std::string>(i);
+      break;
+    case soci::dt_date: {
+      std::tm tm = var.get<std::tm>(i);
+      stream << fmt::format("{:%F %T}", tm);
+    } break;
+    case soci::dt_double:
+      stream << var.get<double>(i);
+      break;
+    case soci::dt_integer:
+      stream << var.get<int>(i);
+      break;
+    case soci::dt_long_long:
+      stream << var.get<long long>(i);
+      break;
+    case soci::dt_unsigned_long_long:
+      stream << var.get<unsigned long long>(i);
+      break;
+    }
+    stream << "] ";
+  }
+  return stream;
 }
 }

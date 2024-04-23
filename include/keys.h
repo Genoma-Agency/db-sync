@@ -25,7 +25,7 @@ namespace dbsync {
 class TableKeys {
 
 public:
-  TableKeys(bool source, const std::string& table, size_t sizeHint, bool update);
+  TableKeys(bool update);
   void loadRow(const soci::row& row);
   void sort();
   const bool hasUpdateCheck() const { return update; };
@@ -34,12 +34,12 @@ public:
   bool updateEqual(long i1, const TableKeys& other, long i2) const;
   const strings& columnNames() const { return names; };
   void bind(soci::statement& stmt, long index) const;
-  std::string rowString(long index);
+  std::string rowString(long index) const;
 
 private:
   void init(const soci::row& row);
-  void quickSort(long left, long right);
-  bool less(long i1, long i2) const { return less(i1, *this, i2); }
+  bool less(long i1, long i2) const;
+  std::partial_ordering compare(long i1, const TableKeys& other, long i2) const;
   void swap(long i1, long i2);
 
 private:
@@ -51,11 +51,12 @@ private:
   using vS = std::vector<std::string>;
   using vect = std::variant<vI, vLL, vULL, vD, vT, vS>;
   using key_type = std::pair<soci::data_type, vect>;
-  const size_t sizeHint;
   const bool update;
   std::size_t count;
   strings names;
+  std::vector<long> index;
   std::vector<key_type> keys;
+  bool sorted;
 };
 
 }

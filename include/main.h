@@ -30,11 +30,13 @@
 #include <iomanip>
 #include <iostream>
 #include <log4cxx/logger.h>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <soci/soci.h>
 #include <string>
 #include <time.h>
+#include <utils.hxx>
 #include <variant>
 #include <vector>
 #include <version.h>
@@ -45,7 +47,12 @@ namespace ba = boost::algorithm;
 
 namespace dbsync {
 
+using namespace util::memory::literal;
+using TimerMs = util::timer::Timer<std::chrono::milliseconds>;
 using strings = std::vector<std::string>;
+
+void progress(
+    const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size = 0, bool endl = false);
 
 // log categories
 extern const char* LOG_MAIN;

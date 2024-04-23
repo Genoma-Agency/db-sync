@@ -19,7 +19,6 @@
 
 #include <db.h>
 #include <main.h>
-#include <utils.hxx>
 
 namespace dbsync {
 
@@ -78,6 +77,7 @@ public:
   const bool hasUpdateCheck() const { return updateCheck; };
   const std::unique_ptr<Field>& at(int index) const { return fields.at(index); };
   const std::unique_ptr<Field>& checkValue() const { return fields.back(); };
+  std::string toString() const;
   std::string toString(const strings& names) const;
   size_t size() const { return fields.size(); }
   void rotate(const int moveCount);
@@ -98,7 +98,6 @@ public:
   TableData& operator=(const TableData&) = delete;
   TableData& operator=(TableData&&) = delete;
   void clear();
-  void sort();
   void loadRow(const soci::row& row);
   const bool hasUpdateCheck() const { return updateCheck; };
   const std::unique_ptr<TableRow>& at(int index) const { return rows.at(index); };
@@ -129,8 +128,8 @@ public:
   std::vector<int>& onlyDestIndexes() { return onlyDest; };
 
 private:
-  const TableKeys& src;
-  const TableKeys& dest;
+  int srcIndex;
+  int destIndex;
   std::vector<int> onlySrc;
   std::vector<int> common;
   std::vector<int> update;

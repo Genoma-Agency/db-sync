@@ -41,7 +41,6 @@ std::ostream& operator<<(std::ostream& stream, const ColumnInfo& var);
 /*****************************************************************************/
 
 struct TableInfo {
-  size_t rowCount;
   std::vector<ColumnInfo> columns;
 };
 
@@ -104,6 +103,9 @@ public:
   const std::string& lastError() const { return error; }
   const MetadataMap& metadata() const { return map; };
   void logTableInfo() const;
+  void transactionBegin();
+  void transactionCommit();
+  bool load(bool source, const std::string& table, TableKeys& data);
   bool query(const std::string& sql, TableData& data);
   bool query(const std::string& sql, std::function<void(const soci::row&)> consumer);
   bool exec(const std::string& sql);
@@ -131,6 +133,7 @@ private:
 private:
   const std::string ref;
   std::unique_ptr<soci::session> session;
+  std::optional<soci::transaction> tx;
   MetadataMap map;
   log4cxx::LoggerPtr log;
   std::string schema;
@@ -138,7 +141,6 @@ private:
   std::size_t readCount;
   std::optional<soci::statement> stmtWrite;
   int keysCount;
-  soci::row rowSelect;
   std::string error;
 
 private:
@@ -153,7 +155,9 @@ template <> struct fmt::formatter<dbsync::ColumnInfo> : ostream_formatter {};
 namespace soci {
 std::ostream& operator<<(std::ostream& stream, const data_type& var);
 std::ostream& operator<<(std::ostream& stream, const indicator& var);
+std::ostream& operator<<(std::ostream& stream, const row& var);
 }
 
 template <> struct fmt::formatter<soci::data_type> : ostream_formatter {};
 template <> struct fmt::formatter<soci::indicator> : ostream_formatter {};
+template <> struct fmt::formatter<soci::row> : ostream_formatter {};

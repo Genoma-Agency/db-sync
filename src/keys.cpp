@@ -19,8 +19,12 @@
 
 namespace dbsync {
 
-TableKeys::TableKeys(bool source, const std::string& t, size_t sh, bool u)
-    : sizeHint{ sh }, update{ u }, count{ 0 } {}
+const std::size_t RESERVE = 1000000;
+
+auto log = log4cxx::Logger::getLogger("keys");
+
+TableKeys::TableKeys(bool u)
+    : update{ u }, count{ 0 }, sorted(true) {}
 
 void TableKeys::init(const soci::row& row) {
   const int end = update ? row.size() - 1 : row.size();
@@ -32,31 +36,43 @@ void TableKeys::init(const soci::row& row) {
     switch(dType) {
     case soci::dt_string:
     case soci::dt_xml:
-    case soci::dt_blob:
-      v = vS(sizeHint);
-      break;
-    case soci::dt_date:
-      v = vT(sizeHint, 0);
-      break;
-    case soci::dt_double:
-      v = vD(sizeHint, 0.0);
-      break;
-    case soci::dt_integer:
-      v = vI(sizeHint, 0);
-      break;
-    case soci::dt_long_long:
-      v = vLL(sizeHint, 0);
-      break;
-    case soci::dt_unsigned_long_long:
-      v = vULL(sizeHint, 0);
-      break;
+    case soci::dt_blob: {
+      vS tmp;
+      tmp.reserve(RESERVE);
+      v = tmp;
+    } break;
+    case soci::dt_date: {
+      vT tmp;
+      tmp.reserve(RESERVE);
+      v = tmp;
+    } break;
+    case soci::dt_double: {
+      vD tmp;
+      tmp.reserve(RESERVE);
+      v = tmp;
+    } break;
+    case soci::dt_integer: {
+      vI tmp;
+      tmp.reserve(RESERVE);
+      v = tmp;
+    } break;
+    case soci::dt_long_long: {
+      vLL tmp;
+      tmp.reserve(RESERVE);
+      v = tmp;
+    } break;
+    case soci::dt_unsigned_long_long: {
+      vULL tmp;
+      tmp.reserve(RESERVE);
+      v = tmp;
+    } break;
     }
     keys.emplace_back(std::make_pair(dType, v));
   }
 }
 
 void TableKeys::loadRow(const soci::row& row) {
-  assert(count < sizeHint);
+  assert(count < std::numeric_limits<long>::max());
   if(count == 0)
     init(row);
   for(std::size_t i = 0; i < row.size(); ++i) {
@@ -65,59 +81,64 @@ void TableKeys::loadRow(const soci::row& row) {
     case soci::dt_string:
     case soci::dt_xml:
     case soci::dt_blob:
-      std::get<vS>(keys[i].second)[count] = row.get<std::string>(i);
+      std::get<vS>(keys[i].second).emplace_back(row.get<std::string>(i));
       break;
     case soci::dt_date: {
       std::tm tm = row.get<std::tm>(i);
-      std::get<vT>(keys[i].second)[count] = std::mktime(&tm);
+      std::get<vT>(keys[i].second).emplace_back(std::mktime(&tm));
     } break;
     case soci::dt_double:
-      std::get<vD>(keys[i].second)[count] = row.get<double>(i);
+      std::get<vD>(keys[i].second).emplace_back(row.get<double>(i));
       break;
     case soci::dt_integer:
-      std::get<vI>(keys[i].second)[count] = row.get<int>(i);
+      std::get<vI>(keys[i].second).emplace_back(row.get<int>(i));
       break;
     case soci::dt_long_long:
-      std::get<vLL>(keys[i].second)[count] = row.get<long long>(i);
+      std::get<vLL>(keys[i].second).emplace_back(row.get<long long>(i));
       break;
     case soci::dt_unsigned_long_long:
-      std::get<vULL>(keys[i].second)[count] = row.get<unsigned long long>(i);
+      std::get<vULL>(keys[i].second).emplace_back(row.get<unsigned long long>(i));
       break;
     }
   }
+  if(count > 0 && sorted)
+    sorted = less(count - 1, count);
   count++;
 }
 
-void TableKeys::bind(soci::statement& stmt, long index) const {
+void TableKeys::bind(soci::statement& stmt, long i) const {
+  assert(i < count);
+  long idx = index[i];
   int columns = keys.size() - (update ? 1 : 0);
   for(int i = 0; i < columns; i++) {
     switch(keys[i].first) {
     case soci::dt_string:
     case soci::dt_xml:
     case soci::dt_blob:
-      stmt.exchange(soci::use(std::get<vS>(keys[i].second)[index]));
+      stmt.exchange(soci::use(std::get<vS>(keys[i].second)[idx]));
       break;
     case soci::dt_date:
-      stmt.exchange(soci::use(std::get<vT>(keys[i].second)[index]));
+      stmt.exchange(soci::use(std::get<vT>(keys[i].second)[idx]));
       break;
     case soci::dt_double:
-      stmt.exchange(soci::use(std::get<vD>(keys[i].second)[index]));
+      stmt.exchange(soci::use(std::get<vD>(keys[i].second)[idx]));
       break;
     case soci::dt_integer:
-      stmt.exchange(soci::use(std::get<vI>(keys[i].second)[index]));
+      stmt.exchange(soci::use(std::get<vI>(keys[i].second)[idx]));
       break;
     case soci::dt_long_long:
-      stmt.exchange(soci::use(std::get<vLL>(keys[i].second)[index]));
+      stmt.exchange(soci::use(std::get<vLL>(keys[i].second)[idx]));
       break;
     case soci::dt_unsigned_long_long:
-      stmt.exchange(soci::use(std::get<vULL>(keys[i].second)[index]));
+      stmt.exchange(soci::use(std::get<vULL>(keys[i].second)[idx]));
       break;
     }
   }
   stmt.define_and_bind();
 }
 
-std::string TableKeys::rowString(long index) {
+std::string TableKeys::rowString(long i) const {
+  long idx = index[i];
   std::stringstream s;
   int columns = keys.size() - (update ? 1 : 0);
   for(int i = 0; i < columns; i++) {
@@ -126,23 +147,23 @@ std::string TableKeys::rowString(long index) {
     case soci::dt_string:
     case soci::dt_xml:
     case soci::dt_blob:
-      s << std::get<vS>(keys[i].second)[index];
+      s << std::get<vS>(keys[i].second)[idx];
       break;
     case soci::dt_date: {
-      std::tm* tm = std::localtime(&std::get<vT>(keys[i].second)[index]);
+      std::tm* tm = std::localtime(&std::get<vT>(keys[i].second)[idx]);
       s << fmt::format("{:%F %T}", *tm);
     } break;
     case soci::dt_double:
-      s << std::get<vD>(keys[i].second)[index];
+      s << std::get<vD>(keys[i].second)[idx];
       break;
     case soci::dt_integer:
-      s << std::get<vI>(keys[i].second)[index];
+      s << std::get<vI>(keys[i].second)[idx];
       break;
     case soci::dt_long_long:
-      s << std::get<vLL>(keys[i].second)[index];
+      s << std::get<vLL>(keys[i].second)[idx];
       break;
     case soci::dt_unsigned_long_long:
-      s << std::get<vULL>(keys[i].second)[index];
+      s << std::get<vULL>(keys[i].second)[idx];
       break;
     }
     s << "] ";
@@ -151,31 +172,29 @@ std::string TableKeys::rowString(long index) {
 }
 
 void TableKeys::sort() {
+  assert(index.empty());
   assert(count <= std::numeric_limits<long>::max());
-  if(count > 0)
-    quickSort(0, count - 1);
+  index.reserve(count);
+  for(long i = 0; i < count; index.emplace_back(i++))
+    ;
+  if(count > 0 && !sorted)
+    std::sort(index.begin(), index.end(), [&](const long& i1, const long& i2) { return less(i1, i2); });
+  for(int c = 1; c < count; c++)
+    assert(less(index[c - 1], index[c]));
 };
 
-void TableKeys::quickSort(long left, long right) {
-  int i = left, j = right;
-  int pivot = (left + right) / 2;
-  while(i <= j) {
-    while(less(i, pivot))
-      i++;
-    while(less(pivot, j))
-      j--;
-    if(i <= j)
-      swap(i++, j--);
-  };
-  if(left < j)
-    quickSort(left, j);
-  if(i < right)
-    quickSort(i, right);
-}
-
 bool TableKeys::less(long i1, const TableKeys& other, long i2) const {
+  std::partial_ordering c = compare(index[i1], other, other.index[i2]);
+  return c == std::partial_ordering::less;
+}
+bool TableKeys::less(long i1, long i2) const {
   if(i1 == i2)
     return false;
+  std::partial_ordering c = compare(i1, *this, i2);
+  return c == std::partial_ordering::less;
+}
+
+std::partial_ordering TableKeys::compare(long i1, const TableKeys& other, long i2) const {
   std::partial_ordering comp = std::partial_ordering::equivalent;
   int columns = keys.size() - (update ? 1 : 0);
   for(int i = 0; comp == std::partial_ordering::equivalent && i < columns; i++) {
@@ -201,8 +220,9 @@ bool TableKeys::less(long i1, const TableKeys& other, long i2) const {
       comp = std::get<vULL>(keys[i].second)[i1] <=> std::get<vULL>(other.keys[i].second)[i2];
       break;
     }
+    assert(comp != std::partial_ordering::unordered);
   }
-  return comp == std::partial_ordering::less;
+  return comp;
 }
 
 void TableKeys::swap(long i1, long i2) {

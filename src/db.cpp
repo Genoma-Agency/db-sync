@@ -24,7 +24,7 @@ namespace dbsync {
 const std::string SQL_NULL_STRING{ (const char*)u8"∅" };
 const std::string SQL_MD5_CHECK{ "`#MD5@CHECK#`" };
 
-const int QUERY_PAGINATION = 100000;
+const int QUERY_PAGINATION = 10000000;
 
 const std::string Db::SQL_TABLES{ R"#(
 select

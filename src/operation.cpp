@@ -20,7 +20,7 @@
 
 namespace dbsync {
 
-const std::size_t BULK = 1000;
+const std::size_t BULK = 5000;
 const std::size_t FEEDBACK = 100;
 
 Operation::Operation(const OperationConfig& c, std::unique_ptr<Db> src, std::unique_ptr<Db> dest) noexcept
@@ -145,11 +145,14 @@ bool Operation::execute() {
     } else {
       LOG4CXX_INFO_FMT(log, "{} table `{}`", m, table);
       std::cout << m << " table `" << table << "`" << (config.dryRun ? " dry run" : "") << std::endl;
+      TimerMs timerTable;
       ok = execute(table);
+      std::cout << fmt::format("table `{}` processed in {}", table, timerTable.elapsed().elapsed().string())
+                << std::endl;
     }
     iter++;
   }
-  std::cout << "completed in " << timer.elapsed().elapsed().string() << " used maximum meory "
+  std::cout << "completed in " << timer.elapsed().elapsed().string() << " used maximum memory "
             << util::proc::maxMemoryUsage() << std::endl;
   return ok;
 }
@@ -270,7 +273,6 @@ bool Operation::execute(const std::string& table) {
     toDb->transactionCommit();
     progress(table, timer, "deleted", count, diff.onlyDestIndexes().size(), true);
   }
-  std::cout << fmt::format("table `{}` processed in {}", table, timer.elapsed().elapsed().string()) << std::endl;
   return true;
 }
 

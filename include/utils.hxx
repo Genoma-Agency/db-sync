@@ -100,13 +100,13 @@ public:
   const bool isZero() const { return _duration.count() == 0; };
   const D& duration() const { return _duration; }
   const std::string& string() {
-    static const std::pair<std::intmax_t, std::string> conv[6] = {
-      {std::chrono::duration_cast<base>(1h).count(),    "h"                 },
-      { std::chrono::duration_cast<base>(1min).count(), "m"                 },
-      { std::chrono::duration_cast<base>(1s).count(),   "s"                 },
-      { std::chrono::duration_cast<base>(1ms).count(),  "ms"                },
-      { std::chrono::duration_cast<base>(1us).count(),  (const char*)u8"μs"},
-      { 1ns .count(),                                   "ns"                }
+    static const std::tuple<std::intmax_t, int, std::string> conv[6] = {
+      {std::chrono::duration_cast<base>(1h).count(),    3, "h"                 },
+      { std::chrono::duration_cast<base>(1min).count(), 3, "m"                 },
+      { std::chrono::duration_cast<base>(1s).count(),   4, "s"                 },
+      { std::chrono::duration_cast<base>(1ms).count(),  5, "ms"                },
+      { std::chrono::duration_cast<base>(1us).count(),  5, (const char*)u8"μs"},
+      { 1ns .count(),                                   6, "ns"                }
     };
     if(!_string.empty())
       return _string;
@@ -115,16 +115,21 @@ public:
     std::intmax_t integer;
     std::intmax_t fraction = std::chrono::duration_cast<std::chrono::nanoseconds>(_duration).count();
     int last;
-    for(int i = 0, count = 0; i < 6 && conv[i].first >= limit && count < 3; last = i++) {
-      integer = fraction / conv[i].first;
-      fraction = fraction % conv[i].first;
+    int stop = 6;
+    for(int i = 0; i < stop; last = i++) {
+      auto oneUnit = std::get<0>(conv[i]);
+      if(oneUnit < limit)
+        break;
+      integer = fraction / oneUnit;
+      fraction = fraction % oneUnit;
       if(integer > 0 || str.tellp() > 0) {
-        str << (str.tellp() > 0 ? " " : "") << integer << conv[i].second;
-        count++;
+        str << (str.tellp() > 0 ? " " : "") << integer << std::get<2>(conv[i]);
+        if(stop == 6)
+          stop = std::get<1>(conv[i]);
       }
     }
     if(str.tellp() == 0)
-      str << "less than 1 " << conv[last].second;
+      str << "less than 1 " << std::get<2>(conv[last]);
     _string = str.str();
     return _string;
   }

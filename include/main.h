@@ -54,6 +54,9 @@ using strings = std::vector<std::string>;
 void progress(
     const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size = 0, bool endl = false);
 
+extern std::size_t maxMemoryKb;
+std::string memoryUsage();
+
 // log categories
 extern const char* LOG_MAIN;
 extern const char* LOG_DB;

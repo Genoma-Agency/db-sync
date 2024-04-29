@@ -24,8 +24,6 @@ namespace dbsync {
 const std::string SQL_NULL_STRING{ (const char*)u8"∅" };
 const std::string SQL_MD5_CHECK{ "`#MD5@CHECK#`" };
 
-const int QUERY_PAGINATION = 10000000;
-
 const std::string Db::SQL_TABLES{ R"#(
 select
 	table_name as "NAME"
@@ -75,9 +73,9 @@ void Db::transactionCommit() {
 
 bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda) {
   try {
-    LOG4CXX_DEBUG_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, util::proc::memoryUsage());
+    LOG4CXX_DEBUG_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, memoryUsage());
     lambda();
-    LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, util::proc::memoryUsage());
+    LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, memoryUsage());
     error.clear();
     return true;
   } catch(soci::mysql_soci_error const& e) {
@@ -149,8 +147,10 @@ void Db::logTableInfo() const {
   }
 }
 
-bool Db::load(bool source, const std::string& table, TableKeys& data) {
+bool Db::loadPk(bool source, const std::string& table, TableKeys& data, std::size_t bulk) {
   auto tm = metadata().at(table);
+  std::string ref = source ? "source" : "target";
+  std::string desc;
   strings pk;
   strings fields;
   for(int i = 0; i < tm.columns.size(); i++) {
@@ -169,18 +169,20 @@ bool Db::load(bool source, const std::string& table, TableKeys& data) {
   std::string select = sqlKeys.str();
   TimerMs timer;
   bool ok = true;
-  int loaded = QUERY_PAGINATION;
-  while(ok && loaded == QUERY_PAGINATION) {
-    progress(table, timer, "key loading", data.size());
-    std::string sql = fmt::format("{} LIMIT {} OFFSET {}", select, QUERY_PAGINATION, data.size());
+  std::size_t loaded = bulk;
+  desc = ref + " key loading";
+  while(ok && loaded == bulk) {
+    progress(table, timer, desc.c_str(), data.size());
+    std::string sql = fmt::format("{} LIMIT {} OFFSET {}", select, bulk, data.size());
     loaded = 0;
     ok = query(sql, [&](const soci::row& row) {
       data.loadRow(row);
       loaded++;
     });
   };
-  progress(table, timer, "key loaded", data.size(), data.size(), true);
-  LOG4CXX_TRACE_FMT(log, "load done [RSS: {}]", util::proc::memoryUsage());
+  desc = ref + " key loaded";
+  progress(table, timer, desc.c_str(), data.size(), data.size(), true);
+  LOG4CXX_TRACE_FMT(log, "{} load done [RSS: {}]", ref, memoryUsage());
   return ok;
 };
 

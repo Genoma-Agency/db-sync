@@ -34,9 +34,9 @@ struct mem_info {
   std::size_t dirty;
 };
 
-mem_info memoryInfo(std::size_t kb);
+mem_info memoryInfo();
 
-std::string memoryString();
+std::string memoryString(std::size_t kb);
 
 std::size_t memoryUsageKb();
 double memoryUsageMb();

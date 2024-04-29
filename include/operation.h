@@ -35,6 +35,8 @@ struct OperationConfig {
   strings& tables;
   bool disableBinLog;
   bool noFail;
+  std::size_t pkBulk;
+  std::size_t modifyBulk;
 };
 
 std::ostream& operator<<(std::ostream& stream, const OperationConfig& var);

@@ -105,7 +105,7 @@ public:
   void logTableInfo() const;
   void transactionBegin();
   void transactionCommit();
-  bool load(bool source, const std::string& table, TableKeys& data);
+  bool loadPk(bool source, const std::string& table, TableKeys& data, std::size_t bulk);
   bool query(const std::string& sql, TableData& data);
   bool query(const std::string& sql, std::function<void(const soci::row&)> consumer);
   bool exec(const std::string& sql);

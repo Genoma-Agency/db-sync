@@ -38,6 +38,8 @@ b::optional<std::string> toUser;
 b::optional<std::string> toPwd;
 b::optional<std::string> toSchema;
 dbsync::strings tables;
+b::optional<int> pkBulk;
+b::optional<int> modifyBulk;
 
 const po::options_description OPTIONS = [] {
   po::options_description options{ "Allowed arguments" };
@@ -47,7 +49,7 @@ const po::options_description OPTIONS = [] {
   options.add_options()("sync,s", "sync records from source to target");
   options.add_options()("dry-run,d", "execute without modifying the target database");
   options.add_options()("update", "enable update of records from source to target");
-  options.add_options()("nofail", "don't stop if error on destination records");
+  options.add_options()("nofail", "don't stop if error on target records");
   options.add_options()("disablebinlog", "disable binary log (privilege required)");
   options.add_options()("fromHost", po::value<>(&fromHost), "source database host IP or name");
   options.add_options()("fromPort", po::value<>(&fromPort)->default_value(3306), "source database port");
@@ -65,6 +67,11 @@ const po::options_description OPTIONS = [] {
   options.add_options()("logConfig, l",
                         po::value<>(&logConfig)->default_value(std::string{ "./db-sync-log.xml" }),
                         "path of logger xml configuration");
+  options.add_options()(
+      "pkBulk", po::value<>(&pkBulk)->default_value(10000000), "number of primary keys to read with a single query");
+  options.add_options()("modifyBulk",
+                        po::value<>(&modifyBulk)->default_value(5000),
+                        "number of records to read to insert/update in a single transaction");
   return options;
 }();
 
@@ -87,6 +94,16 @@ int main(int argc, char* argv[]) {
   if(check > 1) {
     std::cerr << "only one command argument allowed [help|version|copy|sync]" << std::endl;
     return 2;
+  }
+
+  if(pkBulk && *pkBulk < 0) {
+    std::cerr << "pkBulk must be a positive integer" << std::endl;
+    return 3;
+  }
+
+  if(modifyBulk && *modifyBulk < 0) {
+    std::cerr << "modifyBulk must be a positive integer" << std::endl;
+    return 4;
   }
 
   if(check == 0 || params.count("help")) {
@@ -162,7 +179,9 @@ int main(int argc, char* argv[]) {
                                   .dryRun = params.count("dry-run") > 0,
                                   .tables = tables,
                                   .disableBinLog = params.count("disablebinlog") > 0,
-                                  .noFail = params.count("nofail") > 0 };
+                                  .noFail = params.count("nofail") > 0,
+                                  .pkBulk = static_cast<std::size_t>(*pkBulk),
+                                  .modifyBulk = static_cast<std::size_t>(*modifyBulk) };
 
   std::unique_ptr<dbsync::Operation> op
       = std::make_unique<dbsync::Operation>(config, std::move(fromDb), std::move(toDb));
@@ -197,6 +216,14 @@ int main(int argc, char* argv[]) {
 }
 
 namespace dbsync {
+
+std::size_t maxMemoryKb = 0;
+
+std::string memoryUsage() {
+  std::size_t m = util::proc::memoryUsageKb();
+  maxMemoryKb = std::max(m, maxMemoryKb);
+  return util::proc::memoryString(m);
+}
 
 void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size, bool endl) {
   static const std::string& ER = util::term::sequence::eraseRight;

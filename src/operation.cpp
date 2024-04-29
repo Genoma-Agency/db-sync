@@ -20,7 +20,6 @@
 
 namespace dbsync {
 
-const std::size_t BULK = 5000;
 const std::size_t FEEDBACK = 100;
 
 Operation::Operation(const OperationConfig& c, std::unique_ptr<Db> src, std::unique_ptr<Db> dest) noexcept
@@ -57,8 +56,8 @@ bool Operation::checkTables(const strings& src, const strings& dest) {
   for(auto& f : tables) {
     if(std::find(dest.begin(), dest.end(), f) == src.end()) {
       tablesOk = false;
-      LOG4CXX_ERROR_FMT(log, "table `{}` not found in destination", f);
-      std::cerr << "table `" << f << "` not found in destination" << std::endl;
+      LOG4CXX_ERROR_FMT(log, "table `{}` not found in target", f);
+      std::cerr << "table `" << f << "` not found in target" << std::endl;
     }
   }
   if(!tablesOk)
@@ -87,19 +86,15 @@ bool Operation::checkMetadataColumns(const std::string& table) {
   auto sc = src.columns.size();
   auto dc = dest.columns.size();
   if(sc != dc) {
-    LOG4CXX_ERROR_FMT(log, "table \"{}\" columns count mismatch [source {}] [destination {}]", table, sc, dc);
+    LOG4CXX_ERROR_FMT(log, "table \"{}\" columns count mismatch [source {}] [target {}]", table, sc, dc);
     std::cerr << "Table \"" << table << "\" columns count mismatch" << std::endl;
     return false;
   }
   bool columnsOk = true;
   for(int i = 0; i < sc; i++) {
     if(src.columns[i] != dest.columns[i]) {
-      LOG4CXX_ERROR_FMT(log,
-                        "table \"{}\" column {} mismatch [source {}] [destination {}]",
-                        table,
-                        i,
-                        src.columns[i],
-                        dest.columns[i]);
+      LOG4CXX_ERROR_FMT(
+          log, "table \"{}\" column {} mismatch [source {}] [target {}]", table, i, src.columns[i], dest.columns[i]);
       std::cerr << "Table \"" << table << "\" column " << i << " mismatch " << src.columns[i]
                 << " != " << dest.columns[i] << std::endl;
       columnsOk = false;
@@ -152,8 +147,8 @@ bool Operation::execute() {
     }
     iter++;
   }
-  std::cout << "completed in " << timer.elapsed().elapsed().string() << " used maximum memory "
-            << util::proc::maxMemoryUsage() << std::endl;
+  auto time = timer.elapsed().elapsed().string();
+  std::cout << fmt::format("completed in {} maximum memory used {}", time, util::proc::maxMemoryUsage()) << std::endl;
   return ok;
 }
 
@@ -163,13 +158,13 @@ bool Operation::execute(const std::string& table) {
   bool keysLoaded;
   // load source primary key
   TableKeys srcKeys{ config.update };
-  keysLoaded = fromDb->load(true, table, srcKeys);
+  keysLoaded = fromDb->loadPk(true, table, srcKeys, config.pkBulk);
   assert(keysLoaded);
-  // load destination primary key
+  // load target primary key
   TableKeys destKeys{ config.update };
-  keysLoaded = toDb->load(false, table, destKeys);
+  keysLoaded = toDb->loadPk(false, table, destKeys, config.pkBulk);
   assert(keysLoaded);
-  // compare primary keys between source and destination
+  // compare primary keys between source and target
   std::cout << util::term::stream::eraseLine << '\r' << std::flush;
   TableDiff diff{ srcKeys, destKeys };
   diff.logResult(table);
@@ -181,11 +176,11 @@ bool Operation::execute(const std::string& table) {
   // start processing
   timer.reset(expected);
   int count;
-  TableData srcRecord{ true, table, BULK };
+  TableData srcRecord{ true, table, config.modifyBulk };
   std::vector<int>::iterator indexIter;
-  // copy records from source to destination
+  // copy records from source to target
   if(!diff.onlySrcIndexes().empty()) {
-    fromDb->selectPrepare(table, srcKeys.columnNames(), BULK);
+    fromDb->selectPrepare(table, srcKeys.columnNames(), config.modifyBulk);
     toDb->insertPrepare(table);
     count = 0;
     progress(table, timer, "copy", count, diff.onlySrcIndexes().size(), false);
@@ -217,9 +212,9 @@ bool Operation::execute(const std::string& table) {
     }
     progress(table, timer, "copied", count, diff.onlySrcIndexes().size(), true);
   }
-  // update records from source to destination
+  // update records from source to target
   if(config.update && !diff.updateIndexes().empty()) {
-    fromDb->selectPrepare(table, srcKeys.columnNames(), BULK);
+    fromDb->selectPrepare(table, srcKeys.columnNames(), config.modifyBulk);
     count = 0;
     progress(table, timer, "update", count, diff.updateIndexes().size(), false);
     indexIter = diff.updateIndexes().begin();
@@ -252,13 +247,13 @@ bool Operation::execute(const std::string& table) {
     }
     progress(table, timer, "updated", count, diff.updateIndexes().size(), true);
   }
-  // remove records from destination
+  // remove records from target
   if(config.mode == Mode::Sync && !diff.onlyDestIndexes().empty()) {
     toDb->deletePrepare(table, srcKeys.columnNames());
     count = 0;
     toDb->transactionBegin();
     for(int i : diff.onlyDestIndexes()) {
-      if(count % BULK == 0)
+      if(count % config.modifyBulk == 0)
         progress(table, timer, "deleting", count + 1, diff.onlyDestIndexes().size(), false);
       LOG4CXX_TRACE_FMT(log, "delete {}: {}", count + 1, destKeys.rowString(i));
       if(!config.dryRun && !toDb->deleteExecute(table, destKeys, i)) {
@@ -279,7 +274,7 @@ bool Operation::execute(const std::string& table) {
 /*****************************************************************************/
 
 TableData::TableData(const bool source, const std::string& t, const size_t sizeHint, bool uc)
-    : ref{ fmt::format("<{}|{}>", source ? "source" : "destination", t) },
+    : ref{ fmt::format("<{}|{}>", source ? "source" : "target", t) },
       updateCheck{ uc },
       log{ log4cxx::Logger::getLogger(LOG_DATA) } {
   rows.reserve(sizeHint);
@@ -373,7 +368,7 @@ TableDiff::TableDiff(TableKeys& src, TableKeys& dest) noexcept
                       e.elapsed().string());
   };
   sort("source", src);
-  sort("destination", dest);
+  sort("target", dest);
   onlySrc.reserve(src.size());
   common.reserve(src.size());
   onlyDest.reserve(dest.size());
@@ -400,7 +395,7 @@ TableDiff::TableDiff(TableKeys& src, TableKeys& dest) noexcept
 }
 
 void TableDiff::logResult(const std::string& table) const {
-  LOG4CXX_INFO_FMT(log, "table `{}` records: source {} destination {}", table, srcIndex, destIndex);
+  LOG4CXX_INFO_FMT(log, "table `{}` records: source {} target {}", table, srcIndex, destIndex);
   if(onlySrc.empty())
     LOG4CXX_INFO_FMT(log, "table `{}` only in source empty", table);
   else
@@ -410,9 +405,9 @@ void TableDiff::logResult(const std::string& table) const {
   else
     LOG4CXX_INFO_FMT(log, "table `{}` common {} (to update {})", table, common.size(), update.size());
   if(onlyDest.empty())
-    LOG4CXX_INFO_FMT(log, "table `{}` only in destination empty", table);
+    LOG4CXX_INFO_FMT(log, "table `{}` only in target empty", table);
   else
-    LOG4CXX_INFO_FMT(log, "table `{}` only in destination {}", table, onlyDest.size());
+    LOG4CXX_INFO_FMT(log, "table `{}` only in target {}", table, onlyDest.size());
 }
 /*****************************************************************************/
 

@@ -32,6 +32,10 @@ file(GLOB GEN_SOURCES ${GENERATED}/*.cpp)
 list(JOIN GEN_SOURCES "\n" STR_GEN)
 message("GEN_SOURCES:\n${STR_GEN}")
 
+if(CMAKE_BUILD_TYPE STREQUAL Debug)
+  add_definitions(-DDEBUG)
+endif()
+
 add_executable(db-sync
     ${APP_HEADERS}
     ${APP_SOURCES}

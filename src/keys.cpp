@@ -15,11 +15,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <execution>
 #include <keys.h>
 
 namespace dbsync {
 
-const std::size_t RESERVE = 1000000;
+const std::size_t RESERVE = 10000000;
 
 auto log = log4cxx::Logger::getLogger("keys");
 
@@ -175,12 +176,19 @@ void TableKeys::sort() {
   assert(index.empty());
   assert(count <= std::numeric_limits<long>::max());
   index.reserve(count);
+  LOG4CXX_TRACE_FMT(log, "sort begin [RSS: {}]", memoryUsage());
   for(long i = 0; i < count; index.emplace_back(i++))
     ;
+  LOG4CXX_TRACE_FMT(log, "sort index [RSS: {}]", memoryUsage());
   if(count > 0 && !sorted)
-    std::sort(index.begin(), index.end(), [&](const long& i1, const long& i2) { return less(i1, i2); });
+    std::sort(
+        std::execution::seq, index.begin(), index.end(), [&](const long& i1, const long& i2) { return less(i1, i2); });
+  LOG4CXX_TRACE_FMT(log, "sort done [RSS: {}]", memoryUsage());
+#ifdef DEBUG
   for(int c = 1; c < count; c++)
     assert(less(index[c - 1], index[c]));
+  LOG4CXX_TRACE_FMT(log, "sort checked [RSS: {}]", memoryUsage());
+#endif
 };
 
 bool TableKeys::less(long i1, const TableKeys& other, long i2) const {

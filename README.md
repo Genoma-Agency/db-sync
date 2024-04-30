@@ -8,6 +8,8 @@ The selection of records to copy is made based on the primary key of the records
 
 Optionally update of records can be enabled; to optimize speed and memory consumption the md5sum of the fields concatenation is used to compare records.
 
+This application has been optimized for speed and minimum memory usage; it has been tested with valgring against memory leaks.
+
 ## Warning
 
 #### This application modifies database tables content. 
@@ -134,6 +136,8 @@ With this mode all the records in source tables are copied into target tables (i
 
 If you want speed, you need memory. If you want low memory usage, you need time.
 
+With option `update` primary keys are loaded along with md5 sum of fields content, this increase load time by a factor of about 20x.
+
 To copy/sync a table the application loads all primary keys in memory from both source and target database to compare them.
 
 Memory usage is controlled by two arguments:
@@ -210,3 +214,10 @@ git clone https://github.com/Genoma-Agency/db-sync.git
 cd db-sync
 
 ```
+
+## Todo
+
+- support of other database engines
+- parallel load of source and target primary keys
+- parallel tables processing with a configurable thread count
+

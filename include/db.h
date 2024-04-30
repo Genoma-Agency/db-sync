@@ -138,8 +138,8 @@ private:
   log4cxx::LoggerPtr log;
   std::string schema;
   std::optional<soci::statement> stmtRead;
-  std::size_t readCount;
   std::optional<soci::statement> stmtWrite;
+  std::size_t readCount;
   int keysCount;
   std::string error;
 

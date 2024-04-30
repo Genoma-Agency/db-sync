@@ -72,12 +72,13 @@ void Db::transactionCommit() {
 }
 
 bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally) {
+  bool ok = false;
   try {
-    LOG4CXX_DEBUG_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, memoryUsage());
+    LOG4CXX_TRACE_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, memoryUsage());
     lambda();
     LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, memoryUsage());
     error.clear();
-    return true;
+    ok = true;
   } catch(soci::mysql_soci_error const& e) {
     LOG4CXX_ERROR_FMT(log, "<{}> [{}] error [{}]: {}", ref, opDesc, e.err_num_, e.what());
     error = fmt::format("[{}]: {}", e.err_num_, e.what());
@@ -88,12 +89,13 @@ bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda, std:
     LOG4CXX_ERROR_FMT(log, "<{}> [{}] fault: {}", ref, opDesc, e.what());
     error = e.what();
   }
-  try {
-    finally();
-  } catch(std::exception const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> [{}] finally fault: {}", ref, opDesc, e.what());
-  }
-  return false;
+  if(finally)
+    try {
+      finally();
+    } catch(std::exception const& e) {
+      LOG4CXX_ERROR_FMT(log, "<{}> [{}] finally fault: {}", ref, opDesc, e.what());
+    }
+  return ok;
 }
 
 bool Db::open(const std::string& h, int p, const std::string& s, const std::string& user, const std::string& pwd) {
@@ -222,10 +224,7 @@ bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>
   assert(stmtWrite.has_value());
   return apply(
       "exec prepared insert",
-      [&] {
-        LOG4CXX_TRACE_FMT(log, "insert bind {}", row->toString());
-        bind(stmtWrite, row, 0, row->size());
-      },
+      [&] { bind(stmtWrite, row, 0, row->size()); },
       std::bind(&soci::statement::bind_clean_up, *stmtWrite));
 }
 
@@ -250,7 +249,6 @@ bool Db::updateExecute(const std::string& table, const std::unique_ptr<TableRow>
   return apply(
       "exec prepared update",
       [&] {
-        LOG4CXX_TRACE_FMT(log, "update bind {}", row->toString());
         bind(stmtWrite, row, 0, row->size());
         stmtWrite->execute(true);
       },

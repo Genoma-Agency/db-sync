@@ -79,9 +79,6 @@ bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda, std:
     LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, memoryUsage());
     error.clear();
     ok = true;
-  } catch(soci::mysql_soci_error const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> [{}] error [{}]: {}", ref, opDesc, e.err_num_, e.what());
-    error = fmt::format("[{}]: {}", e.err_num_, e.what());
   } catch(soci::soci_error const& e) {
     LOG4CXX_ERROR_FMT(log, "<{}> [{}] error: {}", ref, opDesc, e.what());
     error = e.what();
@@ -104,7 +101,7 @@ bool Db::open(const std::string& h, int p, const std::string& s, const std::stri
   schema = s;
   return apply(fmt::format("connect {}", connection), [&connection, this] {
     std::cout << "connecting " << connection << std::endl;
-    session = std::make_unique<soci::session>(soci::mysql, connection);
+    session = std::make_unique<soci::session>("mysql", connection);
   });
 }
 

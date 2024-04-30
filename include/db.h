@@ -124,7 +124,7 @@ public:
   soci::details::session_backend* backend() { return session->get_backend(); };
 
 private:
-  bool apply(const std::string& opDesc, std::function<void(void)> lambda);
+  bool apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally = nullptr);
   void bind(std::optional<soci::statement>& stmt,
             const std::unique_ptr<TableRow>& row,
             const int startIndex,

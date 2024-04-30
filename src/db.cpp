@@ -71,7 +71,7 @@ void Db::transactionCommit() {
   tx->commit();
 }
 
-bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda) {
+bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally) {
   try {
     LOG4CXX_DEBUG_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, memoryUsage());
     lambda();
@@ -87,6 +87,11 @@ bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda) {
   } catch(std::exception const& e) {
     LOG4CXX_ERROR_FMT(log, "<{}> [{}] fault: {}", ref, opDesc, e.what());
     error = e.what();
+  }
+  try {
+    finally();
+  } catch(std::exception const& e) {
+    LOG4CXX_ERROR_FMT(log, "<{}> [{}] finally fault: {}", ref, opDesc, e.what());
   }
   return false;
 }
@@ -215,12 +220,13 @@ bool Db::insertPrepare(const std::string& table) {
 bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
   assert(map.at(table).columns.size() == row->size());
   assert(stmtWrite.has_value());
-  return apply("exec prepared insert", [&] {
-    LOG4CXX_TRACE_FMT(log, "insert bind {}", row->toString());
-    bind(stmtWrite, row, 0, row->size());
-    stmtWrite->execute(true);
-    stmtWrite->bind_clean_up();
-  });
+  return apply(
+      "exec prepared insert",
+      [&] {
+        LOG4CXX_TRACE_FMT(log, "insert bind {}", row->toString());
+        bind(stmtWrite, row, 0, row->size());
+      },
+      std::bind(&soci::statement::bind_clean_up, *stmtWrite));
 }
 
 bool Db::updatePrepare(const std::string& table, const strings& keys, const strings& fields) {
@@ -241,12 +247,14 @@ bool Db::updateExecute(const std::string& table, const std::unique_ptr<TableRow>
   assert(map.at(table).columns.size() == row->size());
   assert(stmtWrite.has_value());
   row->rotate(keysCount);
-  return apply("exec prepared update", [&] {
-    LOG4CXX_TRACE_FMT(log, "update bind {}", row->toString());
-    bind(stmtWrite, row, 0, row->size());
-    stmtWrite->execute(true);
-    stmtWrite->bind_clean_up();
-  });
+  return apply(
+      "exec prepared update",
+      [&] {
+        LOG4CXX_TRACE_FMT(log, "update bind {}", row->toString());
+        bind(stmtWrite, row, 0, row->size());
+        stmtWrite->execute(true);
+      },
+      std::bind(&soci::statement::bind_clean_up, *stmtWrite));
 }
 
 bool Db::deletePrepare(const std::string& table, const strings& keys) {
@@ -262,12 +270,14 @@ bool Db::deletePrepare(const std::string& table, const strings& keys) {
 
 bool Db::deleteExecute(const std::string& table, const TableKeys& keys, long index) {
   assert(stmtWrite.has_value());
-  return apply("exec prepared delete", [&] {
-    LOG4CXX_TRACE_FMT(log, "delete bind [{}] {}", index, keys.rowString(index));
-    keys.bind(*stmtWrite, index);
-    stmtWrite->execute(true);
-    stmtWrite->bind_clean_up();
-  });
+  return apply(
+      "exec prepared delete",
+      [&] {
+        LOG4CXX_TRACE_FMT(log, "delete bind [{}] {}", index, keys.rowString(index));
+        keys.bind(*stmtWrite, index);
+        stmtWrite->execute(true);
+      },
+      std::bind(&soci::statement::bind_clean_up, *stmtWrite));
 }
 
 bool Db::selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk) {
@@ -300,25 +310,27 @@ bool Db::selectExecute(const std::string& table,
                        TableData& into) {
   static const std::unique_ptr<TableRow> emptyRow;
   assert(stmtRead.has_value());
-  return apply("exec prepared select", [&] {
-    int count = 0;
-    while(count < readCount && from != end) {
-      LOG4CXX_TRACE_FMT(log, "select bind [{}] {}", *from, keys.rowString(*from));
-      keys.bind(*stmtRead, *from);
-      from++;
-      count++;
-    }
-    for(; count < readCount; count++)
-      bind(stmtRead, emptyRow, 0, keysCount);
-    soci::row row;
-    stmtRead->exchange_for_rowset(soci::into(row));
-    stmtRead->execute(false);
-    soci::rowset_iterator<soci::row> it(*stmtRead, row);
-    soci::rowset_iterator<soci::row> end;
-    for(; it != end; ++it)
-      into.loadRow(row);
-    stmtRead->bind_clean_up();
-  });
+  return apply(
+      "exec prepared select",
+      [&] {
+        int count = 0;
+        while(count < readCount && from != end) {
+          LOG4CXX_TRACE_FMT(log, "select bind [{}] {}", *from, keys.rowString(*from));
+          keys.bind(*stmtRead, *from);
+          from++;
+          count++;
+        }
+        for(; count < readCount; count++)
+          bind(stmtRead, emptyRow, 0, keysCount);
+        soci::row row;
+        stmtRead->exchange_for_rowset(soci::into(row));
+        stmtRead->execute(false);
+        soci::rowset_iterator<soci::row> it(*stmtRead, row);
+        soci::rowset_iterator<soci::row> end;
+        for(; it != end; ++it)
+          into.loadRow(row);
+      },
+      std::bind(&soci::statement::bind_clean_up, *stmtRead));
 }
 
 void Db::bind(std::optional<soci::statement>& stmt,

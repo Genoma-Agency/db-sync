@@ -14,6 +14,8 @@ Optionally update of records can be enabled; to optimize speed and memory consum
 
 #### Use with extreme caution and back up databases before running.
 
+#### If the source database is modified (insert/update/delete) during the execution, the target database may have inconsistent foreign keys.
+
 This application does not change the structure of the tables. 
 All tables in the source database must already be present and identical in the destination database.
 
@@ -147,11 +149,12 @@ To calculate the average maximum memory required you can use the formula:
 - PK = size of T primary key [C++ data type] (integer autoincrement is 4)
 - TF = number of fields in T
 - TS = average row size of T
-- MI = (PK + 4) * (ST + TT)
+- KS = if `update` 36 else 4
+- MI = (PK + KS) * (ST + TT)
 - ML = `pkBulk` * 50
 - MD = ( TF * 100 + TS ) * `modifyBulk`;
 
-max memory = MI + min(ML, MD)
+approximate max memory used = MI + min(ML, MD)
 
 ## Required libraries
 

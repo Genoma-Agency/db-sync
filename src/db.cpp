@@ -224,7 +224,10 @@ bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>
   assert(stmtWrite.has_value());
   return apply(
       "exec prepared insert",
-      [&] { bind(stmtWrite, row, 0, row->size()); },
+      [&] {
+        bind(stmtWrite, row, 0, row->size());
+        stmtWrite->execute(true);
+      },
       std::bind(&soci::statement::bind_clean_up, *stmtWrite));
 }
 

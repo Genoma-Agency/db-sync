@@ -146,13 +146,13 @@ to the number of records with the same primary keys.
 
 To copy/sync a table the application loads all primary keys in memory from both source and target database to compare them.
 
-Memory usage is controlled by two arguments:
+Memory usage is controlled by three arguments:
 
 - `pkBulk` 
 - `compareBulk`
 - `modifyBulk`
 
-To calculate the average maximum memory required you can use the formula:
+To calculate the approximate maximum memory required you can use the formula:
 
 - T = table with the highest number of rows (sum of source and target)
 - ST = rows count of T in source

@@ -141,7 +141,8 @@ With this mode all the records in source tables are copied into target tables (i
 
 If you want speed, you need memory. If you want low memory usage, you need time.
 
-With option `update` primary keys are loaded along with md5 sum of fields content, this increase load time by a factor of about 20x.
+With option `update` md5 sum of fields content for common records is calculated, this increase execution proportionally 
+to the number of records with the same primary keys.
 
 To copy/sync a table the application loads all primary keys in memory from both source and target database to compare them.
 
@@ -172,7 +173,7 @@ approximate max memory used = MI + min(ML, MC, MD)
 - soci mysql
 - lib4cxx
 - boost (date_time program_options filesystem)
-- fmt
+- fmt (10.x)
 
 ## Build
 

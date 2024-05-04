@@ -4,9 +4,11 @@ Mysql/Mariadb records transfer utility.
 
 This application copy/sync records between databases.
 
-The selection of records to copy is made based on the primary key of the records. 
+The selection of records to copy is made based on the primary key of the records. Primary keys load in source and target database is parallel. 
 
-Optionally update of records can be enabled; to optimize speed and memory consumption the md5sum of the fields concatenation is used to compare records.
+Optionally update of records can be enabled; 
+to optimize speed and memory consumption the md5sum of the fields concatenation is used to compare records.
+Md5 sum of records in source and target database is parallel.
 
 This application has been optimized for speed and minimum memory usage; it has been tested with valgring against memory leaks.
 
@@ -52,6 +54,9 @@ Allowed arguments:
   --logConfig arg (= ./db-sync-log.xml) path of logger xml configuration
   --pkBulk arg (= 10000000)             number of primary keys to read with a 
                                         single query
+  --compareBulk arg (= 10000)           number of records to read to compare 
+                                        md5 content when option 'update' is 
+                                        used
   --modifyBulk arg (= 5000)             number of records to read to 
                                         insert/update in a single transaction
 ```
@@ -143,6 +148,7 @@ To copy/sync a table the application loads all primary keys in memory from both 
 Memory usage is controlled by two arguments:
 
 - `pkBulk` 
+- `compareBulk`
 - `modifyBulk`
 
 To calculate the average maximum memory required you can use the formula:
@@ -154,11 +160,12 @@ To calculate the average maximum memory required you can use the formula:
 - TF = number of fields in T
 - TS = average row size of T
 - KS = if `update` 36 else 4
-- MI = (PK + KS) * (ST + TT)
+- MI = (PK + 4) * (ST + TT)
 - ML = `pkBulk` * 50
+- MC = `compareBulk` * (PK + 100)
 - MD = ( TF * 100 + TS ) * `modifyBulk`;
 
-approximate max memory used = MI + min(ML, MD)
+approximate max memory used = MI + min(ML, MC, MD)
 
 ## Required libraries
 
@@ -218,6 +225,5 @@ cd db-sync
 ## Todo
 
 - support of other database engines
-- parallel load of source and target primary keys
-- parallel tables processing with a configurable thread count
+- parallel tables processing with a configurable thread pool
 

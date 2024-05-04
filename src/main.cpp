@@ -39,6 +39,7 @@ b::optional<std::string> toPwd;
 b::optional<std::string> toSchema;
 dbsync::strings tables;
 b::optional<int> pkBulk;
+b::optional<int> compareBulk;
 b::optional<int> modifyBulk;
 
 const po::options_description OPTIONS = [] {
@@ -69,6 +70,9 @@ const po::options_description OPTIONS = [] {
                         "path of logger xml configuration");
   options.add_options()(
       "pkBulk", po::value<>(&pkBulk)->default_value(10000000), "number of primary keys to read with a single query");
+  options.add_options()("compareBulk",
+                        po::value<>(&compareBulk)->default_value(10000),
+                        "number of records to read to compare md5 content when option 'update' is used");
   options.add_options()("modifyBulk",
                         po::value<>(&modifyBulk)->default_value(5000),
                         "number of records to read to insert/update in a single transaction");
@@ -181,6 +185,7 @@ int main(int argc, char* argv[]) {
                                   .disableBinLog = params.count("disablebinlog") > 0,
                                   .noFail = params.count("nofail") > 0,
                                   .pkBulk = static_cast<std::size_t>(*pkBulk),
+                                  .compareBulk = static_cast<std::size_t>(*compareBulk),
                                   .modifyBulk = static_cast<std::size_t>(*modifyBulk) };
 
   std::unique_ptr<dbsync::Operation> op
@@ -225,32 +230,22 @@ std::string memoryUsage() {
   return util::proc::memoryString(m);
 }
 
-void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size, bool endl) {
-  static const std::string& ER = util::term::sequence::eraseRight;
+void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size) {
   if(count == 0) {
     if(size > 0)
-      std::cout << fmt::format("begin {} `{}` {} records\r", t, table, size);
+      std::cout << fmt::format("`{}` begin {} {} records", table, t, size) << std::endl;
     else
-      std::cout << fmt::format("begin {} `{}`\r", t, table);
+      std::cout << fmt::format("`{}` begin {} ", table, t) << std::endl;
   } else {
     auto times = timer.elapsed(count + 1);
     auto s = times.speed<std::chrono::minutes>();
     auto e = times.elapsed().string();
-    if(endl) {
-      if(size > 0)
-        std::cout << fmt::format("{} `{}` {} records [{:.1f} rows/min] [elapsed {}]{}", t, table, size, s, e, ER)
-                  << std::endl;
-      else
-        std::cout << fmt::format("{} `{}` [{:.1f} rows/min] [elapsed {}]{}", t, table, s, e, ER) << std::endl;
-    } else {
-      auto m = times.missing().isZero() ? "?" : times.missing().string();
-      if(size > 0)
-        std::cout << fmt::format(
-            "{} `{}` {}/{} [{:.1f} rows/min] [elapsed {}] [eta {}]{}\r", t, table, count, size, s, e, m, ER);
-      else
-        std::cout << fmt::format(
-            "{} `{}` {} [{:.1f} rows/min] [elapsed {}] [eta {}]{}\r", t, table, count, s, e, m, ER);
-    }
+    auto m = times.missing().isZero() ? "?" : times.missing().string();
+    if(size > 0)
+      std::cout << fmt::format("`{}` {} {}/{} [{:.1f} rows/min] [elapsed {}] [eta {}]", table, t, count, size, s, e, m)
+                << std::endl;
+    else
+      std::cout << fmt::format("`{}` {} {} [{:.1f} rows/min] [elapsed {}]", table, t, count, s, e) << std::endl;
   }
   std::cout << std::flush;
 };

@@ -15,6 +15,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <future>
 #include <keys.h>
 #include <operation.h>
 
@@ -154,121 +155,251 @@ bool Operation::execute() {
 
 bool Operation::execute(const std::string& table) {
   LOG4CXX_DEBUG_FMT(log, "start processing table `{}`", table);
-  TimerMs timer;
-  bool keysLoaded;
   // load source primary key
-  TableKeys srcKeys{ config.update };
-  keysLoaded = fromDb->loadPk(true, table, srcKeys, config.pkBulk);
-  assert(keysLoaded);
+  TableKeys srcKeys;
+  auto srcLoad = std::async(std::launch::async, [&] {
+    auto loaded = fromDb->loadPk(true, table, srcKeys, config.pkBulk);
+    if(loaded)
+      srcKeys.sort("source");
+    return loaded;
+  });
   // load target primary key
-  TableKeys destKeys{ config.update };
-  keysLoaded = toDb->loadPk(false, table, destKeys, config.pkBulk);
-  assert(keysLoaded);
+  TableKeys destKeys;
+  auto destLoad = std::async(std::launch::async, [&] {
+    auto loaded = toDb->loadPk(false, table, destKeys, config.pkBulk);
+    if(loaded)
+      destKeys.sort("target");
+    return loaded;
+  });
+  // wait asynch load
+  bool loaded;
+  loaded = srcLoad.get();
+  assert(loaded);
+  loaded = destLoad.get();
+  assert(loaded);
   // compare primary keys between source and target
-  std::cout << util::term::stream::eraseLine << '\r' << std::flush;
-  TableDiff diff{ srcKeys, destKeys };
-  diff.logResult(table);
-  int expected = diff.onlySrcIndexes().size();
-  if(config.update)
-    expected += diff.updateIndexes().size();
-  if(config.mode == Mode::Sync)
-    expected += diff.onlyDestIndexes().size();
-  // start processing
-  timer.reset(expected);
-  int count;
-  TableData srcRecord{ true, table, config.modifyBulk };
-  std::vector<int>::iterator indexIter;
+  auto diff = compareKeys(table, srcKeys, destKeys);
   // copy records from source to target
-  if(!diff.onlySrcIndexes().empty()) {
-    fromDb->selectPrepare(table, srcKeys.columnNames(), config.modifyBulk);
-    toDb->insertPrepare(table);
-    count = 0;
-    progress(table, timer, "copy", count, diff.onlySrcIndexes().size(), false);
-    indexIter = diff.onlySrcIndexes().begin();
-    while(count < diff.onlySrcIndexes().size()) {
-      srcRecord.clear();
-      if(!fromDb->selectExecute(table, srcKeys, indexIter, diff.onlySrcIndexes().end(), srcRecord)) {
-        std::cout << std::endl
-                  << "select failed at key " << srcKeys.rowString(*indexIter) << ' ' << fromDb->lastError()
-                  << std::endl;
-        return false;
-      }
-      assert(srcRecord.size() > 0);
-      toDb->transactionBegin();
-      for(int i = 0; i < srcRecord.size(); i++) {
-        if((count + i) % FEEDBACK == 0)
-          progress(table, timer, "copy", count + i, diff.onlySrcIndexes().size(), false);
-        LOG4CXX_TRACE_FMT(log, "insert {}: {}", count + i + 1, srcRecord.rowString(i));
-        if(!config.dryRun && !toDb->insertExecute(table, srcRecord.at(i))) {
-          auto record = srcRecord.rowString(i);
-          std::cout << std::endl << "insert failed for " << record << ' ' << toDb->lastError() << std::endl;
-          LOG4CXX_ERROR_FMT(log, "insert failed {} {}", record, toDb->lastError());
-          if(!config.noFail)
-            return false;
-        }
-      }
-      toDb->transactionCommit();
-      count += srcRecord.size();
-    }
-    progress(table, timer, "copied", count, diff.onlySrcIndexes().size(), true);
-  }
+  if(!executeAdd(table, srcKeys, std::get<0>(diff)))
+    return false;
   // update records from source to target
-  if(config.update && !diff.updateIndexes().empty()) {
-    fromDb->selectPrepare(table, srcKeys.columnNames(), config.modifyBulk);
-    count = 0;
-    progress(table, timer, "update", count, diff.updateIndexes().size(), false);
-    indexIter = diff.updateIndexes().begin();
-    while(count < diff.updateIndexes().size()) {
-      srcRecord.clear();
-      if(!fromDb->selectExecute(table, srcKeys, indexIter, diff.updateIndexes().end(), srcRecord)) {
-        std::cout << std::endl
-                  << "select failed at key " << srcKeys.rowString(*indexIter) << ' ' << fromDb->lastError()
-                  << std::endl;
-        return false;
-      }
-      assert(srcRecord.size() > 0);
-      if(count == 0)
-        toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
-      toDb->transactionBegin();
-      for(int i = 0; i < srcRecord.size(); i++) {
-        if((count + i) % FEEDBACK == 0)
-          progress(table, timer, "copy", count + i, diff.onlySrcIndexes().size(), false);
-        LOG4CXX_TRACE_FMT(log, "update {}: {}", count + i + 1, srcRecord.rowString(i));
-        if(!config.dryRun && !toDb->updateExecute(table, srcRecord.at(i))) {
-          auto record = srcRecord.rowString(i);
-          std::cout << std::endl << "update failed for " << record << ' ' << toDb->lastError() << std::endl;
-          LOG4CXX_ERROR_FMT(log, "update failed {} {}", record, toDb->lastError());
-          if(!config.noFail)
-            return false;
-        }
-      }
-      toDb->transactionCommit();
-      count += srcRecord.size();
-    }
-    progress(table, timer, "updated", count, diff.updateIndexes().size(), true);
-  }
+  if(config.update)
+    if(!executeUpdate(table, srcKeys, std::get<1>(diff)))
+      return false;
   // remove records from target
-  if(config.mode == Mode::Sync && !diff.onlyDestIndexes().empty()) {
-    toDb->deletePrepare(table, srcKeys.columnNames());
-    count = 0;
+  if(config.mode == Mode::Sync)
+    if(!executeDelete(table, destKeys, std::get<2>(diff)))
+      return false;
+  return true;
+}
+
+bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::size_t total) {
+  if(total == 0)
+    return true;
+  TimerMs timer{ total };
+  std::size_t count = 0;
+  TableData srcRecord{ true, table, config.modifyBulk };
+  TableKeysIterator indexIter = srcKeys.iter(true);
+  fromDb->selectPrepare(table, srcKeys.columnNames(), config.modifyBulk);
+  toDb->insertPrepare(table);
+  progress(table, timer, "copy", count, total);
+  while(!indexIter.end()) {
+    srcRecord.clear();
+    if(!fromDb->selectExecute(table, srcKeys, indexIter, srcRecord)) {
+      auto r = srcKeys.rowString(indexIter.value());
+      std::cerr << "select failed at key " << r << ' ' << fromDb->lastError() << std::endl;
+      return false;
+    }
+    assert(srcRecord.size() > 0);
     toDb->transactionBegin();
-    for(int i : diff.onlyDestIndexes()) {
-      if(count % config.modifyBulk == 0)
-        progress(table, timer, "deleting", count + 1, diff.onlyDestIndexes().size(), false);
-      LOG4CXX_TRACE_FMT(log, "delete {}: {}", count + 1, destKeys.rowString(i));
-      if(!config.dryRun && !toDb->deleteExecute(table, destKeys, i)) {
-        auto record = destKeys.rowString(i);
-        std::cout << std::endl << "delete failed for " << record << ' ' << toDb->lastError() << std::endl;
-        LOG4CXX_ERROR_FMT(log, "delete failed {} {}", record, toDb->lastError());
+    for(int i = 0; i < srcRecord.size(); i++) {
+      if((count + i) % FEEDBACK == 0)
+        progress(table, timer, "copy", count + i, total);
+      LOG4CXX_TRACE_FMT(log, "insert {}: {}", count + i + 1, srcRecord.rowString(i));
+      if(!config.dryRun && !toDb->insertExecute(table, srcRecord.at(i))) {
+        auto record = srcRecord.rowString(i);
+        std::cerr << "insert failed for " << record << ' ' << toDb->lastError() << std::endl;
+        LOG4CXX_ERROR_FMT(log, "insert failed {} {}", record, toDb->lastError());
         if(!config.noFail)
           return false;
       }
-      count++;
     }
     toDb->transactionCommit();
-    progress(table, timer, "deleted", count, diff.onlyDestIndexes().size(), true);
+    count += srcRecord.size();
   }
+  progress(table, timer, "copied", count);
   return true;
+}
+
+bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std::size_t total) {
+  if(total == 0)
+    return true;
+  TimerMs timer{ total };
+  std::size_t count = 0;
+  TableData srcCompare{ true, table, config.compareBulk, true };
+  TableData destCompare{ false, table, config.compareBulk, true };
+  // filter record which need to be updateb (md5 sum fileds compare)
+  srcKeys.revertFlags();
+  TableKeysIterator fromIter = srcKeys.iter(true);
+  TableKeysIterator toIter = srcKeys.iter(true);
+  fromDb->comparePrepare(table, config.compareBulk);
+  toDb->comparePrepare(table, config.compareBulk);
+  progress(table, timer, "compare primary keys", 0, total);
+  while(!fromIter.end()) {
+    TableKeysIterator iter{ fromIter };
+    auto srcLoad = std::async(std::launch::async, [&] {
+      srcCompare.clear();
+      return fromDb->selectExecute(table, srcKeys, fromIter, srcCompare);
+    });
+    auto destLoad = std::async(std::launch::async, [&] {
+      destCompare.clear();
+      return toDb->selectExecute(table, srcKeys, toIter, destCompare);
+    });
+    bool loaded = srcLoad.get() && destLoad.get();
+    if(!loaded) {
+      std::cerr << fmt::format("load md5 sum failed - source [{}] target [{}]", fromDb->lastError(), toDb->lastError())
+                << std::endl;
+      return false;
+    }
+    assert(srcCompare.size() == destCompare.size());
+    for(int i = 0; i < srcCompare.size(); i++) {
+      TableRow& srcRow = *srcCompare.at(i);
+      TableRow& destRow = *destCompare.at(i);
+      assert(srcRow <=> destRow == std::partial_ordering::equivalent);
+      /*
+      std::cout << fmt::format("{} -> {} > KEY {} SRC {} TARGET {}",
+                               iter.value(),
+                               iter.ref(),
+                               srcKeys.rowString(iter.value()),
+                               srcRow.toString(),
+                               destRow.toString())
+                << std::endl;
+      */
+#ifdef DEBUG
+      assert(srcKeys.check(iter.value(), srcRow.toRecord()));
+      assert(srcKeys.check(iter.value(), destRow.toRecord()));
+#endif
+      Field& srcMd5 = *srcRow.checkValue();
+      Field& destMd5 = *destRow.checkValue();
+      srcKeys.setFlag(iter.value(), srcMd5 <=> destMd5 != std::partial_ordering::equivalent);
+      ++iter;
+    }
+    count += srcCompare.size();
+    progress(table, timer, "comparing primary keys", count, total);
+  }
+  progress(table, timer, "compared primary keys", total);
+  // begin updates
+  TableData srcRecord{ true, table, config.modifyBulk };
+  total = srcKeys.size(true);
+  if(total == 0) {
+    std::cout << "no record to update found" << std::endl;
+    return true;
+  }
+  std::cout << total << " records to update found" << std::endl;
+  timer.reset(total);
+  TableKeysIterator indexIter = srcKeys.iter(true);
+  fromDb->selectPrepare(table, srcKeys.columnNames(), config.modifyBulk);
+  count = 0;
+  progress(table, timer, "update", count, total);
+  while(!indexIter.end()) {
+    srcRecord.clear();
+    if(!fromDb->selectExecute(table, srcKeys, indexIter, srcRecord)) {
+      auto r = srcKeys.rowString(indexIter.value());
+      std::cerr << "select failed at key " << r << ' ' << fromDb->lastError() << std::endl;
+      return false;
+    }
+    assert(srcRecord.size() > 0);
+    if(count == 0)
+      toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
+    toDb->transactionBegin();
+    for(int i = 0; i < srcRecord.size(); i++) {
+      if((count + i) % FEEDBACK == 0)
+        progress(table, timer, "update", count + i, total);
+      LOG4CXX_TRACE_FMT(log, "update {}: {}", count + i + 1, srcRecord.rowString(i));
+      if(!config.dryRun && !toDb->updateExecute(table, srcRecord.at(i))) {
+        auto record = srcRecord.rowString(i);
+        std::cerr << "update failed for " << record << ' ' << toDb->lastError() << std::endl;
+        LOG4CXX_ERROR_FMT(log, "update failed {} {}", record, toDb->lastError());
+        if(!config.noFail)
+          return false;
+      }
+    }
+    toDb->transactionCommit();
+    count += srcRecord.size();
+  }
+  progress(table, timer, "updated", count);
+  return true;
+}
+
+bool Operation::executeDelete(const std::string& table, TableKeys& destKeys, std::size_t total) {
+  if(total == 0)
+    return true;
+  TimerMs timer{ total };
+  std::size_t count = 0;
+  TableKeysIterator indexIter = destKeys.iter(true);
+  toDb->deletePrepare(table, destKeys.columnNames());
+  count = 0;
+  toDb->transactionBegin();
+  while(!indexIter.end()) {
+    if(count % config.modifyBulk == 0)
+      progress(table, timer, "deleting", count + 1, total);
+    LOG4CXX_TRACE_FMT(log, "delete {}: {}", count + 1, destKeys.rowString(indexIter.value()));
+    if(!config.dryRun && !toDb->deleteExecute(table, destKeys, indexIter.value())) {
+      auto record = destKeys.rowString(indexIter.value());
+      std::cerr << "delete failed for " << record << ' ' << toDb->lastError() << std::endl;
+      LOG4CXX_ERROR_FMT(log, "delete failed {} {}", record, toDb->lastError());
+      if(!config.noFail)
+        return false;
+    }
+    ++indexIter;
+    count++;
+  }
+  toDb->transactionCommit();
+  progress(table, timer, "deleted", count);
+  return true;
+}
+
+std::tuple<std::size_t, std::size_t, std::size_t>
+Operation::compareKeys(const std::string& table, TableKeys& src, TableKeys& dest) {
+  std::size_t srcIndex = 0;
+  std::size_t destIndex = 0;
+  while(srcIndex < src.size() && destIndex < dest.size()) {
+    if(src.less(srcIndex, dest, destIndex)) {
+      src.setFlag(srcIndex++);
+    } else if(dest.less(destIndex, src, srcIndex)) {
+      dest.setFlag(destIndex++);
+    } else {
+      srcIndex++;
+      destIndex++;
+    }
+  }
+  while(srcIndex < src.size())
+    src.setFlag(srcIndex++);
+  while(destIndex < dest.size())
+    dest.setFlag(destIndex++);
+  assert(srcIndex == src.size());
+  assert(destIndex == dest.size());
+  std::size_t onlySrc = src.size(true);
+  std::size_t common = src.size() - onlySrc;
+  std::size_t onlyDest = dest.size(true);
+  assert(common == dest.size() - onlyDest);
+  LOG4CXX_INFO_FMT(log, "table `{}` records: source {} target {}", table, srcIndex, destIndex);
+  if(onlySrc == 0)
+    LOG4CXX_INFO_FMT(log, "table `{}` only in source empty", table);
+  else
+    LOG4CXX_INFO_FMT(log, "table `{}` only in source {}", table, onlySrc);
+  if(common == 0)
+    LOG4CXX_INFO_FMT(log, "table `{}` common empty", table);
+  else
+    LOG4CXX_INFO_FMT(log, "table `{}` common {}", table, common);
+  if(onlyDest == 0)
+    LOG4CXX_INFO_FMT(log, "table `{}` only in target empty", table);
+  else
+    LOG4CXX_INFO_FMT(log, "table `{}` only in target {}", table, onlyDest);
+  std::cout << fmt::format(
+      "`{}` primary key compare [only source: {}] [common: {}] [only target: {}]", table, onlySrc, common, onlyDest)
+            << std::endl;
+  return std::make_tuple(onlySrc, common, onlyDest);
 }
 
 /*****************************************************************************/
@@ -350,65 +481,14 @@ std::string TableRow::toString(const strings& names) const {
   return s.str();
 }
 
-/*****************************************************************************/
-
-TableDiff::TableDiff(TableKeys& src, TableKeys& dest) noexcept
-    : srcIndex{ 0 }, destIndex{ 0 }, log{ log4cxx::Logger::getLogger(LOG_DATA) } {
-  assert(src.hasUpdateCheck() == dest.hasUpdateCheck());
-  auto sort = [this](const char* ref, TableKeys& tk) {
-    TimerMs timer;
-    LOG4CXX_DEBUG_FMT(log, "sorting {} keys: {}", ref, tk.size());
-    timer.reset(tk.size());
-    tk.sort();
-    auto e = timer.elapsed(tk.size());
-    LOG4CXX_DEBUG_FMT(log,
-                      "sorting {} key done [{} keys/sec] [elapsed {}]",
-                      ref,
-                      (int)e.speed<std::chrono::seconds>(),
-                      e.elapsed().string());
-  };
-  sort("source", src);
-  sort("target", dest);
-  onlySrc.reserve(src.size());
-  common.reserve(src.size());
-  onlyDest.reserve(dest.size());
-  while(srcIndex < src.size() && destIndex < dest.size()) {
-    if(src.less(srcIndex, dest, destIndex)) {
-      onlySrc.push_back(srcIndex++);
-    } else if(dest.less(destIndex, src, srcIndex)) {
-      onlyDest.push_back(destIndex++);
-    } else {
-      if(src.hasUpdateCheck() && !src.updateEqual(srcIndex, dest, destIndex))
-        update.push_back(srcIndex);
-      common.push_back(srcIndex++);
-      destIndex++;
-    }
-  }
-  while(srcIndex < src.size())
-    onlySrc.push_back(srcIndex++);
-  while(destIndex < dest.size())
-    onlyDest.push_back(destIndex++);
-  assert(srcIndex == src.size());
-  assert(destIndex == dest.size());
-  assert(onlySrc.size() + common.size() == src.size());
-  assert(onlyDest.size() + common.size() == dest.size());
+DbRecord TableRow::toRecord() const {
+  DbRecord record;
+  const int end = updateCheck ? fields.size() - 1 : fields.size();
+  for(int i = 0; i < end; i++)
+    record.emplace_back(std::make_pair(at(i)->type(), at(i)->asVariant()));
+  return record;
 }
 
-void TableDiff::logResult(const std::string& table) const {
-  LOG4CXX_INFO_FMT(log, "table `{}` records: source {} target {}", table, srcIndex, destIndex);
-  if(onlySrc.empty())
-    LOG4CXX_INFO_FMT(log, "table `{}` only in source empty", table);
-  else
-    LOG4CXX_INFO_FMT(log, "table `{}` only in source {}", table, onlySrc.size());
-  if(common.empty())
-    LOG4CXX_INFO_FMT(log, "table `{}` common empty", table);
-  else
-    LOG4CXX_INFO_FMT(log, "table `{}` common {} (to update {})", table, common.size(), update.size());
-  if(onlyDest.empty())
-    LOG4CXX_INFO_FMT(log, "table `{}` only in target empty", table);
-  else
-    LOG4CXX_INFO_FMT(log, "table `{}` only in target {}", table, onlyDest.size());
-}
 /*****************************************************************************/
 
 std::ostream& operator<<(std::ostream& stream, const Mode& var) {

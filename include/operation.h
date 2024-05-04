@@ -36,6 +36,7 @@ struct OperationConfig {
   bool disableBinLog;
   bool noFail;
   std::size_t pkBulk;
+  std::size_t compareBulk;
   std::size_t modifyBulk;
 };
 
@@ -56,7 +57,12 @@ public:
 private:
   bool checkMetadataColumns(const std::string& table);
   bool execute(const std::string& table);
+  bool executeAdd(const std::string& table, TableKeys& srcKeys, std::size_t total);
+  bool executeUpdate(const std::string& table, TableKeys& srcKeys, std::size_t total);
+  bool executeDelete(const std::string& table, TableKeys& destKeys, std::size_t total);
   std::string buildSqlKeys(const std::string& table) const;
+  std::tuple<std::size_t, std::size_t, std::size_t>
+  compareKeys(const std::string& table, TableKeys& srcKeys, TableKeys& destKeys);
 
 private:
   const OperationConfig& config;
@@ -78,9 +84,13 @@ public:
   std::partial_ordering operator<=>(const TableRow& other) const;
   const bool hasUpdateCheck() const { return updateCheck; };
   const std::unique_ptr<Field>& at(int index) const { return fields.at(index); };
-  const std::unique_ptr<Field>& checkValue() const { return fields.back(); };
+  const std::unique_ptr<Field>& checkValue() const {
+    assert(updateCheck);
+    return fields.back();
+  };
   std::string toString() const;
   std::string toString(const strings& names) const;
+  DbRecord toRecord() const;
   size_t size() const { return fields.size(); }
   void rotate(const int moveCount);
 
@@ -113,29 +123,6 @@ private:
   const bool updateCheck;
   strings names;
   std::vector<std::unique_ptr<TableRow>> rows;
-  log4cxx::LoggerPtr log;
-};
-
-/*****************************************************************************/
-
-class TableKeys;
-
-class TableDiff {
-public:
-  TableDiff(TableKeys& src, TableKeys& dest) noexcept;
-  void logResult(const std::string& table) const;
-  std::vector<int>& onlySrcIndexes() { return onlySrc; };
-  std::vector<int>& commonIndexes() { return common; };
-  std::vector<int>& updateIndexes() { return update; };
-  std::vector<int>& onlyDestIndexes() { return onlyDest; };
-
-private:
-  int srcIndex;
-  int destIndex;
-  std::vector<int> onlySrc;
-  std::vector<int> common;
-  std::vector<int> update;
-  std::vector<int> onlyDest;
   log4cxx::LoggerPtr log;
 };
 

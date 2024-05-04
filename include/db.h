@@ -67,6 +67,7 @@ public:
   const int& asInt() const { return value.number.integer; };
   const long long& asLongLong() const { return value.number.longLong; };
   const unsigned long long& asULongLong() const { return value.number.uLongLong; };
+  DbValue asVariant() const;
 
 private:
   soci::data_type dType;
@@ -86,6 +87,7 @@ private:
 /*****************************************************************************/
 
 class TableKeys;
+class TableKeysIterator;
 class TableData;
 class TableRow;
 
@@ -114,12 +116,9 @@ public:
   bool updateExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
   bool deletePrepare(const std::string& table, const strings& keys);
   bool deleteExecute(const std::string& table, const TableKeys& keys, long index);
+  bool comparePrepare(const std::string& table, const std::size_t bulk);
   bool selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk);
-  bool selectExecute(const std::string& table,
-                     const TableKeys& keys,
-                     std::vector<int>::iterator& from,
-                     std::vector<int>::iterator end,
-                     TableData& into);
+  bool selectExecute(const std::string& table, const TableKeys& keys, TableKeysIterator& iter, TableData& into);
   soci::details::session_backend* backend() { return session->get_backend(); };
 
 private:

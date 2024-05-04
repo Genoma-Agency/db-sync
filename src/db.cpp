@@ -156,19 +156,18 @@ bool Db::loadPk(bool source, const std::string& table, TableKeys& data, std::siz
   std::string ref = source ? "source" : "target";
   std::string desc;
   strings pk;
-  strings fields;
   for(int i = 0; i < tm.columns.size(); i++) {
     if(tm.columns[i].primaryKey) {
       pk.push_back(fmt::format("`{}`", tm.columns[i].name));
-    } else if(data.hasUpdateCheck()) {
-      fields.push_back(fmt::format("COALESCE(`{}`,'{}')", tm.columns[i].name, SQL_NULL_STRING));
     }
   }
   std::stringstream sqlKeys;
   std::stringstream sqlWhere;
   sqlKeys << "SELECT " << ba::join(pk, ",");
+  /*
   if(data.hasUpdateCheck())
     sqlKeys << ",MD5(CONCAT(" << ba::join(fields, ",") << ")) AS " << SQL_MD5_CHECK;
+  */
   sqlKeys << " FROM `" << table << '`';
   std::string select = sqlKeys.str();
   TimerMs timer;
@@ -185,7 +184,7 @@ bool Db::loadPk(bool source, const std::string& table, TableKeys& data, std::siz
     });
   };
   desc = ref + " key loaded";
-  progress(table, timer, desc.c_str(), data.size(), data.size(), true);
+  progress(table, timer, desc.c_str(), data.size());
   LOG4CXX_TRACE_FMT(log, "{} load done [RSS: {}]", ref, memoryUsage());
   return ok;
 };
@@ -278,6 +277,38 @@ bool Db::deleteExecute(const std::string& table, const TableKeys& keys, long ind
       std::bind(&soci::statement::bind_clean_up, *stmtWrite));
 }
 
+bool Db::comparePrepare(const std::string& table, const std::size_t bulk) {
+  assert(bulk > 0);
+  readCount = bulk;
+  auto tm = metadata().at(table);
+  strings pk;
+  strings fields;
+  strings order;
+  for(int i = 0; i < tm.columns.size(); i++) {
+    if(tm.columns[i].primaryKey) {
+      pk.push_back(fmt::format("`{}`", tm.columns[i].name));
+      order.push_back(std::to_string(i + 1));
+    } else {
+      fields.push_back(fmt::format("COALESCE(`{}`,'{}')", tm.columns[i].name, SQL_NULL_STRING));
+    }
+  }
+  keysCount = pk.size();
+  std::stringstream s;
+  s << "SELECT " << ba::join(pk, ",") << ",MD5(CONCAT(" << ba::join(fields, ",") << ")) AS " << SQL_MD5_CHECK;
+  s << " FROM `" << table << "` WHERE (" << ba::join(pk, ",") << ") IN (";
+  for(int b = 0; b < bulk; b++) {
+    if(b > 0)
+      s << ',';
+    s << "(:k0_" << b;
+    for(int i = 1; i < keysCount; i++)
+      s << ",:k" << i << '_' << b;
+    s << ')';
+  }
+  s << ") ORDER BY " << ba::join(order, ",");
+  std::string sql = s.str();
+  return apply(sql, [&] { stmtRead = (session->prepare << sql); });
+}
+
 bool Db::selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk) {
   assert(bulk > 0);
   assert(keys.size() > 0);
@@ -301,21 +332,17 @@ bool Db::selectPrepare(const std::string& table, const strings& keys, const std:
   return apply(sql, [&] { stmtRead = (session->prepare << sql); });
 }
 
-bool Db::selectExecute(const std::string& table,
-                       const TableKeys& keys,
-                       std::vector<int>::iterator& from,
-                       std::vector<int>::iterator end,
-                       TableData& into) {
+bool Db::selectExecute(const std::string& table, const TableKeys& keys, TableKeysIterator& iter, TableData& into) {
   static const std::unique_ptr<TableRow> emptyRow;
   assert(stmtRead.has_value());
   return apply(
       "exec prepared select",
       [&] {
         int count = 0;
-        while(count < readCount && from != end) {
-          LOG4CXX_TRACE_FMT(log, "select bind [{}] {}", *from, keys.rowString(*from));
-          keys.bind(*stmtRead, *from);
-          from++;
+        while(count < readCount && !iter.end()) {
+          LOG4CXX_TRACE_FMT(log, "select bind [{}] {}", iter.value(), keys.rowString(iter.value()));
+          keys.bind(*stmtRead, iter.value());
+          ++iter;
           count++;
         }
         for(; count < readCount; count++)
@@ -385,8 +412,8 @@ Field::Field(const soci::row& row, const std::size_t i)
     break;
   case soci::dt_date: {
     std::tm tm = row.get<std::tm>(i);
-    value.number.epoch = std::mktime(&tm);
     value.string = fmt::format("{:%F %T}", tm);
+    value.number.epoch = std::mktime(&tm);
   } break;
   case soci::dt_double:
     value.number.decimal = row.get<double>(i);
@@ -455,6 +482,25 @@ std::partial_ordering Field::operator<=>(const Field& other) const {
   return comp;
 }
 
+DbValue Field::asVariant() const {
+  DbValue v;
+  switch(dType) {
+  case soci::dt_string:
+  case soci::dt_xml:
+  case soci::dt_blob:
+  case soci::dt_date:
+    return v = value.string;
+  case soci::dt_double:
+    return v = value.number.decimal;
+  case soci::dt_integer:
+    return v = value.number.integer;
+  case soci::dt_long_long:
+    return v = value.number.longLong;
+  case soci::dt_unsigned_long_long:
+    return v = value.number.uLongLong;
+  }
+  return v;
+}
 /*****************************************************************************/
 
 std::ostream& operator<<(std::ostream& stream, const TableInfo& var) {

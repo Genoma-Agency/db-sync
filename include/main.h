@@ -51,8 +51,11 @@ using namespace util::memory::literal;
 using TimerMs = util::timer::Timer<std::chrono::milliseconds>;
 using strings = std::vector<std::string>;
 
-void progress(
-    const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size = 0, bool endl = false);
+using DbValue = std::variant<int, long long, unsigned long long, double, std::time_t, std::string>;
+using DbField = std::pair<soci::data_type, DbValue>;
+using DbRecord = std::vector<DbField>;
+
+void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size = 0);
 
 extern std::size_t maxMemoryKb;
 std::string memoryUsage();

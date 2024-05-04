@@ -24,12 +24,18 @@ const std::size_t RESERVE = 10000000;
 
 auto log = log4cxx::Logger::getLogger("keys");
 
-TableKeys::TableKeys(bool u)
-    : update{ u }, count{ 0 }, sorted(true) {}
+TableKeys::TableKeys()
+    : count{ 0 }, sorted(true) {}
+
+TableKeysIterator TableKeys::iter(bool flag) const {
+  std::size_t index = 0;
+  while(flags[index] != flag && index < count)
+    index++;
+  return TableKeysIterator{ *this, index };
+}
 
 void TableKeys::init(const soci::row& row) {
-  const int end = update ? row.size() - 1 : row.size();
-  for(std::size_t i = 0; i < end; i++)
+  for(std::size_t i = 0; i < row.size(); i++)
     names.push_back(row.get_properties(i).get_name());
   for(std::size_t i = 0; i < row.size(); ++i) {
     vect v;
@@ -73,7 +79,7 @@ void TableKeys::init(const soci::row& row) {
 }
 
 void TableKeys::loadRow(const soci::row& row) {
-  assert(count < std::numeric_limits<long>::max());
+  assert(count < std::numeric_limits<std::size_t>::max());
   if(count == 0)
     init(row);
   for(std::size_t i = 0; i < row.size(); ++i) {
@@ -102,16 +108,15 @@ void TableKeys::loadRow(const soci::row& row) {
       break;
     }
   }
-  if(count > 0 && sorted)
-    sorted = less(count - 1, count);
   count++;
+  if(count > 1 && sorted)
+    sorted = less(count - 2, count - 1);
 }
 
-void TableKeys::bind(soci::statement& stmt, long i) const {
+void TableKeys::bind(soci::statement& stmt, std::size_t i) const {
   assert(i < count);
-  long idx = index[i];
-  int columns = keys.size() - (update ? 1 : 0);
-  for(int i = 0; i < columns; i++) {
+  auto idx = index[i];
+  for(int i = 0; i < keys.size(); i++) {
     switch(keys[i].first) {
     case soci::dt_string:
     case soci::dt_xml:
@@ -138,11 +143,11 @@ void TableKeys::bind(soci::statement& stmt, long i) const {
   stmt.define_and_bind();
 }
 
-std::string TableKeys::rowString(long i) const {
-  long idx = index[i];
+std::string TableKeys::rowString(std::size_t i) const {
+  assert(i < count);
+  std::size_t idx = index[i];
   std::stringstream s;
-  int columns = keys.size() - (update ? 1 : 0);
-  for(int i = 0; i < columns; i++) {
+  for(int i = 0; i < keys.size(); i++) {
     s << names[i] << '[';
     switch(keys[i].first) {
     case soci::dt_string:
@@ -172,40 +177,92 @@ std::string TableKeys::rowString(long i) const {
   return s.str();
 }
 
-void TableKeys::sort() {
+void TableKeys::sort(const char* ref) {
   assert(index.empty());
-  assert(count <= std::numeric_limits<long>::max());
   index.reserve(count);
-  LOG4CXX_TRACE_FMT(log, "sort begin [RSS: {}]", memoryUsage());
-  for(long i = 0; i < count; index.emplace_back(i++))
-    ;
-  LOG4CXX_TRACE_FMT(log, "sort index [RSS: {}]", memoryUsage());
+  flags.reserve(count);
+  TimerMs timer;
+  LOG4CXX_DEBUG_FMT(log, "sort {} begin [keys: {}] [RSS: {}]", ref, count, memoryUsage());
+  for(std::size_t i = 0; i < count; i++) {
+    index.emplace_back(i);
+    flags.emplace_back(false);
+  }
+  LOG4CXX_TRACE_FMT(log, "sort {} index [RSS: {}]", ref, memoryUsage());
   if(count > 0 && !sorted)
-    std::sort(
-        std::execution::seq, index.begin(), index.end(), [&](const long& i1, const long& i2) { return less(i1, i2); });
-  LOG4CXX_TRACE_FMT(log, "sort done [RSS: {}]", memoryUsage());
+    std::sort(std::execution::seq, index.begin(), index.end(), [&](const std::size_t& i1, const std::size_t& i2) {
+      return less(i1, i2);
+    });
+  auto e = timer.elapsed(count);
+  LOG4CXX_DEBUG_FMT(log,
+                    "sort {} done [{} keys/sec] [elapsed {}] [RSS: {}]",
+                    ref,
+                    (int)e.speed<std::chrono::seconds>(),
+                    e.elapsed().string(),
+                    memoryUsage());
 #ifdef DEBUG
-  for(int c = 1; c < count; c++)
+  for(std::size_t c = 1; c < count; c++)
     assert(less(index[c - 1], index[c]));
   LOG4CXX_TRACE_FMT(log, "sort checked [RSS: {}]", memoryUsage());
 #endif
-};
+}
 
-bool TableKeys::less(long i1, const TableKeys& other, long i2) const {
+bool TableKeys::less(std::size_t i1, const TableKeys& other, std::size_t i2) const {
+  assert(i1 < count);
+  assert(i2 < other.count);
   std::partial_ordering c = compare(index[i1], other, other.index[i2]);
   return c == std::partial_ordering::less;
 }
-bool TableKeys::less(long i1, long i2) const {
+
+bool TableKeys::less(std::size_t i1, std::size_t i2) const {
+  assert(i1 < count);
+  assert(i2 < count);
   if(i1 == i2)
     return false;
   std::partial_ordering c = compare(i1, *this, i2);
   return c == std::partial_ordering::less;
 }
 
-std::partial_ordering TableKeys::compare(long i1, const TableKeys& other, long i2) const {
+bool TableKeys::check(std::size_t idx, DbRecord record) const {
+  assert(idx < count);
+  assert(keys.size() == record.size());
   std::partial_ordering comp = std::partial_ordering::equivalent;
-  int columns = keys.size() - (update ? 1 : 0);
-  for(int i = 0; comp == std::partial_ordering::equivalent && i < columns; i++) {
+  for(std::size_t i = 0; comp == std::partial_ordering::equivalent && i < keys.size(); i++) {
+    if(keys[i].first != record[i].first) {
+      comp = std::partial_ordering::unordered;
+      break;
+    }
+    switch(keys[i].first) {
+    case soci::dt_string:
+    case soci::dt_xml:
+    case soci::dt_blob:
+      comp = std::get<vS>(keys[i].second)[index[idx]] <=> std::get<std::string>(record[i].second);
+      break;
+    case soci::dt_date:
+      comp = std::get<vT>(keys[i].second)[index[idx]] <=> std::get<std::time_t>(record[i].second);
+      break;
+    case soci::dt_double:
+      comp = std::get<vD>(keys[i].second)[index[idx]] <=> std::get<double>(record[i].second);
+      break;
+    case soci::dt_integer:
+      comp = std::get<vI>(keys[i].second)[index[idx]] <=> std::get<int>(record[i].second);
+      break;
+    case soci::dt_long_long:
+      comp = std::get<vLL>(keys[i].second)[index[idx]] <=> std::get<long long>(record[i].second);
+      break;
+    case soci::dt_unsigned_long_long:
+      comp = std::get<vULL>(keys[i].second)[index[idx]] <=> std::get<unsigned long long>(record[i].second);
+      break;
+    }
+    assert(comp != std::partial_ordering::unordered);
+  }
+  return comp == std::partial_ordering::equivalent;
+}
+
+std::partial_ordering TableKeys::compare(std::size_t i1, const TableKeys& other, std::size_t i2) const {
+  assert(i1 < count);
+  assert(i2 < other.count);
+  std::partial_ordering comp = std::partial_ordering::equivalent;
+  for(std::size_t i = 0; comp == std::partial_ordering::equivalent && i < keys.size(); i++) {
     switch(keys[i].first) {
     case soci::dt_string:
     case soci::dt_xml:
@@ -233,10 +290,12 @@ std::partial_ordering TableKeys::compare(long i1, const TableKeys& other, long i
   return comp;
 }
 
-void TableKeys::swap(long i1, long i2) {
+void TableKeys::swap(std::size_t i1, std::size_t i2) {
+  assert(i1 < count);
+  assert(i2 < count);
   if(i1 == i2)
     return;
-  for(int i = 0; i < keys.size(); i++) {
+  for(std::size_t i = 0; i < keys.size(); i++) {
     switch(keys[i].first) {
     case soci::dt_string:
     case soci::dt_xml:
@@ -262,10 +321,6 @@ void TableKeys::swap(long i1, long i2) {
   }
 }
 
-bool TableKeys::updateEqual(long i1, const TableKeys& other, long i2) const {
-  assert(update && other.update);
-  int i = keys.size() - 1;
-  std::partial_ordering comp = std::get<vS>(keys[i].second)[i1] <=> std::get<vS>(other.keys[i].second)[i2];
-  return comp == std::partial_ordering::equivalent;
-}
+/*****************************************************************************/
+
 }

@@ -244,7 +244,7 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
   TableKeysIterator toIter = srcKeys.iter(true);
   fromDb->comparePrepare(table, config.compareBulk);
   toDb->comparePrepare(table, config.compareBulk);
-  progress(table, timer, "compare primary keys", 0, total);
+  progress(table, timer, "compare fields md5", 0, total);
   while(!fromIter.end()) {
     TableKeysIterator iter{ fromIter };
     auto srcLoad = std::async(std::launch::async, [&] {
@@ -284,9 +284,9 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       srcKeys.setFlag(iter.value(), srcMd5 <=> destMd5 != std::partial_ordering::equivalent);
       ++iter;
     }
-    progress(table, timer, "comparing primary keys", count, total);
+    progress(table, timer, "comparing fields md5", count, total);
   }
-  progress(table, timer, "compared primary keys", total);
+  progress(table, timer, "compared fields md5", total);
   // begin updates
   TableData srcRecord{ true, table, config.modifyBulk };
   total = srcKeys.size(true);

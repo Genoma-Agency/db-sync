@@ -186,7 +186,20 @@ install required packages
 ```
 dnf install g++ cmake git zip
 dnf --enablerepo=crb install mysql-devel
-dnf install boost-devel fmt-devel apr-devel apr-util-devel
+dnf install boost-devel apr-devel apr-util-devel
+```
+
+fmt-devel package is old, build yourself
+
+```
+git clone -b 10.2.1 https://github.com/fmtlib/fmt.git
+cd fmt
+mkdir build
+cd build
+cmake ..
+make -j 4
+make install
+make clean
 ```
 
 soci-devel package is broken, build yourself
@@ -195,9 +208,9 @@ soci-devel package is broken, build yourself
 git clone https://github.com/SOCI/soci.git
 cd soci
 mkdir build
-cd build/
+cd build
 cmake ..
-make
+make -j 4
 make install
 make clean
 ```
@@ -210,7 +223,7 @@ cd logging-log4cxx
 mkdir build
 cd build/
 cmake ..
-make
+make -j 4
 make install
 make clean
 ```

@@ -238,14 +238,14 @@ void progress(const std::string& table, TimerMs& timer, const char* t, int count
       std::cout << fmt::format("`{}` begin {} ", table, t) << std::endl;
   } else {
     auto times = timer.elapsed(count + 1);
-    auto s = times.speed<std::chrono::minutes>();
+    auto s = times.speed<std::chrono::seconds>();
     auto e = times.elapsed().string();
     auto m = times.missing().isZero() ? "?" : times.missing().string();
     if(size > 0)
-      std::cout << fmt::format("`{}` {} {}/{} [{:.1f} rows/min] [elapsed {}] [eta {}]", table, t, count, size, s, e, m)
+      std::cout << fmt::format("`{}` {} {}/{} [{:.1f} rows/sec] [elapsed {}] [eta {}]", table, t, count, size, s, e, m)
                 << std::endl;
     else
-      std::cout << fmt::format("`{}` {} {} [{:.1f} rows/min] [elapsed {}]", table, t, count, s, e) << std::endl;
+      std::cout << fmt::format("`{}` {} {} [{:.1f} rows/sec] [elapsed {}]", table, t, count, s, e) << std::endl;
   }
   std::cout << std::flush;
 };

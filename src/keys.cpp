@@ -226,7 +226,7 @@ bool TableKeys::check(std::size_t idx, DbRecord record) const {
   assert(idx < count);
   assert(keys.size() == record.size());
   std::partial_ordering comp = std::partial_ordering::equivalent;
-  for(std::size_t i = 0; comp == std::partial_ordering::equivalent && i < keys.size(); i++) {
+  for(std::size_t i = 0; comp == std::partial_ordering::equivalent && i < keys.size() - 1; i++) {
     if(keys[i].first != record[i].first) {
       comp = std::partial_ordering::unordered;
       break;

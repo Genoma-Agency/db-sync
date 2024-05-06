@@ -21,7 +21,7 @@
 
 namespace dbsync {
 
-const std::size_t FEEDBACK = 100;
+const std::size_t FEEDBACK = 1000;
 
 Operation::Operation(const OperationConfig& c, std::unique_ptr<Db> src, std::unique_ptr<Db> dest) noexcept
     : config{ c },
@@ -212,9 +212,9 @@ bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::si
     }
     assert(srcRecord.size() > 0);
     toDb->transactionBegin();
-    for(int i = 0; i < srcRecord.size(); i++) {
-      if((count + i) % FEEDBACK == 0)
-        progress(table, timer, "copy", count + i, total);
+    for(int i = 0; i < srcRecord.size(); i++, count++) {
+      if((count + i + 1) % FEEDBACK == 0)
+        progress(table, timer, "copy", count + i + 1, total);
       LOG4CXX_TRACE_FMT(log, "insert {}: {}", count + i + 1, srcRecord.rowString(i));
       if(!config.dryRun && !toDb->insertExecute(table, srcRecord.at(i))) {
         auto record = srcRecord.rowString(i);
@@ -225,7 +225,6 @@ bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::si
       }
     }
     toDb->transactionCommit();
-    count += srcRecord.size();
   }
   progress(table, timer, "copied", count);
   return true;
@@ -262,7 +261,7 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       return false;
     }
     assert(srcCompare.size() == destCompare.size());
-    for(int i = 0; i < srcCompare.size(); i++) {
+    for(int i = 0; i < srcCompare.size(); i++, count++) {
       TableRow& srcRow = *srcCompare.at(i);
       TableRow& destRow = *destCompare.at(i);
       assert(srcRow <=> destRow == std::partial_ordering::equivalent);
@@ -284,7 +283,6 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       srcKeys.setFlag(iter.value(), srcMd5 <=> destMd5 != std::partial_ordering::equivalent);
       ++iter;
     }
-    count += srcCompare.size();
     progress(table, timer, "comparing primary keys", count, total);
   }
   progress(table, timer, "compared primary keys", total);
@@ -312,9 +310,9 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
     if(count == 0)
       toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
     toDb->transactionBegin();
-    for(int i = 0; i < srcRecord.size(); i++) {
-      if((count + i) % FEEDBACK == 0)
-        progress(table, timer, "update", count + i, total);
+    for(int i = 0; i < srcRecord.size(); i++, count++) {
+      if((count + i + 1) % FEEDBACK == 0)
+        progress(table, timer, "update", count + i + 1, total);
       LOG4CXX_TRACE_FMT(log, "update {}: {}", count + i + 1, srcRecord.rowString(i));
       if(!config.dryRun && !toDb->updateExecute(table, srcRecord.at(i))) {
         auto record = srcRecord.rowString(i);
@@ -325,7 +323,6 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       }
     }
     toDb->transactionCommit();
-    count += srcRecord.size();
   }
   progress(table, timer, "updated", count);
   return true;
@@ -339,11 +336,12 @@ bool Operation::executeDelete(const std::string& table, TableKeys& destKeys, std
   TableKeysIterator indexIter = destKeys.iter(true);
   toDb->deletePrepare(table, destKeys.columnNames());
   count = 0;
+  progress(table, timer, "deleting", count, total);
   toDb->transactionBegin();
   while(!indexIter.end()) {
-    if(count % config.modifyBulk == 0)
-      progress(table, timer, "deleting", count + 1, total);
-    LOG4CXX_TRACE_FMT(log, "delete {}: {}", count + 1, destKeys.rowString(indexIter.value()));
+    if(++count % config.modifyBulk == 0)
+      progress(table, timer, "deleting", count, total);
+    LOG4CXX_TRACE_FMT(log, "delete {}: {}", count, destKeys.rowString(indexIter.value()));
     if(!config.dryRun && !toDb->deleteExecute(table, destKeys, indexIter.value())) {
       auto record = destKeys.rowString(indexIter.value());
       std::cerr << "delete failed for " << record << ' ' << toDb->lastError() << std::endl;
@@ -352,7 +350,6 @@ bool Operation::executeDelete(const std::string& table, TableKeys& destKeys, std
         return false;
     }
     ++indexIter;
-    count++;
   }
   toDb->transactionCommit();
   progress(table, timer, "deleted", count);

@@ -63,6 +63,7 @@ private:
   std::string buildSqlKeys(const std::string& table) const;
   std::tuple<std::size_t, std::size_t, std::size_t>
   compareKeys(const std::string& table, TableKeys& srcKeys, TableKeys& destKeys);
+  bool feedback(const std::size_t count, const std::size_t bulk, const std::size_t total) const;
 
 private:
   const OperationConfig& config;

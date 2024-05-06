@@ -1,5 +1,5 @@
 #include <cassert>
-#include <format>
+#include <fmt/core.h>
 #include <fstream>
 #include <unistd.h>
 #include <utils.hxx>
@@ -25,13 +25,13 @@ mem_info memoryInfo() {
 
 std::string memoryString(std::size_t kb) {
   if(kb < 1024)
-    return std::format("{} Kb", kb);
+    return fmt::format("{} Kb", kb);
   double tmp = kb;
   tmp /= 1024;
   if(tmp < 1024)
-    return std::format("{:.2f} Mb", tmp);
+    return fmt::format("{:.2f} Mb", tmp);
   tmp /= 1024;
-  return std::format("{:.2f} Gb", tmp);
+  return fmt::format("{:.2f} Gb", tmp);
 }
 
 std::size_t memoryUsageKb() { return memoryInfo().rss / 1_Kb; }

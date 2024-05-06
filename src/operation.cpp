@@ -212,7 +212,7 @@ bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::si
     }
     assert(srcRecord.size() > 0);
     toDb->transactionBegin();
-    for(int i = 0; i < srcRecord.size(); i++, count++) {
+    for(int i = 0; i < srcRecord.size(); i++) {
       if((count + i + 1) % FEEDBACK == 0)
         progress(table, timer, "copy", count + i + 1, total);
       LOG4CXX_TRACE_FMT(log, "insert {}: {}", count + i + 1, srcRecord.rowString(i));
@@ -225,6 +225,7 @@ bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::si
       }
     }
     toDb->transactionCommit();
+    count += srcRecord.size();
   }
   progress(table, timer, "copied", count);
   return true;
@@ -310,7 +311,7 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
     if(count == 0)
       toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
     toDb->transactionBegin();
-    for(int i = 0; i < srcRecord.size(); i++, count++) {
+    for(int i = 0; i < srcRecord.size(); i++) {
       if((count + i + 1) % FEEDBACK == 0)
         progress(table, timer, "update", count + i + 1, total);
       LOG4CXX_TRACE_FMT(log, "update {}: {}", count + i + 1, srcRecord.rowString(i));
@@ -323,6 +324,7 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       }
     }
     toDb->transactionCommit();
+    count += srcRecord.size();
   }
   progress(table, timer, "updated", count);
   return true;

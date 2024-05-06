@@ -196,6 +196,19 @@ git clone -b 10.2.1 https://github.com/fmtlib/fmt.git
 cd fmt
 mkdir build
 cd build
+cmake -DBUILD_SHARED_LIBS=TRUE -DCMAKE_POSITION_INDEPENDENT_CODE=TRUE ..
+make -j 4
+make install
+make clean
+```
+
+log4cxx-devel package isn't provided, build yourself
+
+```
+git clone https://github.com/apache/logging-log4cxx.git
+cd logging-log4cxx
+mkdir build
+cd build/
 cmake ..
 make -j 4
 make install
@@ -209,19 +222,6 @@ git clone https://github.com/SOCI/soci.git
 cd soci
 mkdir build
 cd build
-cmake ..
-make -j 4
-make install
-make clean
-```
-
-log4cxx-devel package isn't provided, build yourself
-
-```
-git clone https://github.com/apache/logging-log4cxx.git
-cd logging-log4cxx
-mkdir build
-cd build/
 cmake ..
 make -j 4
 make install

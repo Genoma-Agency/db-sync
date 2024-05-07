@@ -25,7 +25,8 @@ Operation::Operation(const OperationConfig& c, std::unique_ptr<Db> src, std::uni
     : config{ c },
       fromDb{ std::move(src) },
       toDb{ std::move(dest) },
-      log{ log4cxx::Logger::getLogger(LOG_OPERATION) } {}
+      log{ log4cxx::Logger::getLogger(LOG_OPERATION) },
+      dbRw{ 0 } {}
 
 Operation::~Operation() {
   fromDb.reset(nullptr);
@@ -146,7 +147,9 @@ bool Operation::execute() {
     iter++;
   }
   auto time = timer.elapsed().elapsed().string();
-  std::cout << fmt::format("completed in {} maximum memory used {}", time, util::proc::maxMemoryUsage()) << std::endl;
+  std::cout << fmt::format(
+      "completed in {} db R/W {:L} maximum memory used {}", time, dbRw, util::proc::maxMemoryUsage())
+            << std::endl;
   return ok;
 }
 
@@ -158,6 +161,7 @@ bool Operation::execute(const std::string& table) {
     auto loaded = fromDb->loadPk(true, table, srcKeys, config.pkBulk);
     if(loaded)
       srcKeys.sort("source");
+    dbRw += srcKeys.size();
     return loaded;
   });
   // load target primary key
@@ -166,6 +170,7 @@ bool Operation::execute(const std::string& table) {
     auto loaded = toDb->loadPk(false, table, destKeys, config.pkBulk);
     if(loaded)
       destKeys.sort("target");
+    dbRw += destKeys.size();
     return loaded;
   });
   // wait asynch load
@@ -211,7 +216,7 @@ bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::si
       return false;
     }
     assert(srcRecord.size() > 0);
-    progress(table, timer, "copy load", srcRecord.size(), total);
+    progress(table, timer, "copy load", count + srcRecord.size(), total);
     toDb->transactionBegin();
     for(int i = 0; i < srcRecord.size(); i++) {
       if(feedback(count + i + 1, srcRecord.size(), total))
@@ -227,6 +232,7 @@ bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::si
     }
     toDb->transactionCommit();
     count += srcRecord.size();
+    dbRw += srcRecord.size();
   }
   progress(table, timer, "copied", count);
   return true;
@@ -268,6 +274,7 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       return false;
     }
     assert(srcCompare.size() == destCompare.size());
+    dbRw += srcCompare.size() + destCompare.size();
     for(int i = 0; i < srcCompare.size(); i++, count++) {
       TableRow& srcRow = *srcCompare.at(i);
       TableRow& destRow = *destCompare.at(i);
@@ -317,7 +324,8 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       return false;
     }
     assert(srcRecord.size() > 0);
-    progress(table, timer, "update load", srcRecord.size(), total);
+    dbRw += srcRecord.size();
+    progress(table, timer, "update load", count + srcRecord.size(), total);
     if(count == 0)
       toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
     toDb->transactionBegin();
@@ -335,6 +343,7 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
     }
     toDb->transactionCommit();
     count += srcRecord.size();
+    dbRw += srcRecord.size();
   }
   progress(table, timer, "updated", count);
   return true;
@@ -362,6 +371,7 @@ bool Operation::executeDelete(const std::string& table, TableKeys& destKeys, std
         return false;
     }
     ++indexIter;
+    dbRw++;
   }
   toDb->transactionCommit();
   progress(table, timer, "deleted", count);
@@ -375,7 +385,11 @@ bool Operation::feedback(const std::size_t count, const std::size_t bulk, const 
     return true;
   if(count < 1000)
     return count % 100 == 0;
-  return count % 1000 == 0;
+  if(count < 10000)
+    return count % 1000 == 0;
+  if(count < 100000)
+    return count % 10000 == 0;
+  return count % 100000 == 0;
 }
 
 std::tuple<std::size_t, std::size_t, std::size_t>

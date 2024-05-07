@@ -284,10 +284,11 @@ bool Db::comparePrepare(const std::string& table, const std::size_t bulk) {
   strings pk;
   strings fields;
   strings order;
+  int o = 1;
   for(int i = 0; i < tm.columns.size(); i++) {
     if(tm.columns[i].primaryKey) {
       pk.push_back(fmt::format("`{}`", tm.columns[i].name));
-      order.push_back(std::to_string(i + 1));
+      order.push_back(std::to_string(o++));
     } else {
       fields.push_back(fmt::format("COALESCE(`{}`,'{}')", tm.columns[i].name, SQL_NULL_STRING));
     }

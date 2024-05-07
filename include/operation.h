@@ -71,6 +71,7 @@ private:
   std::unique_ptr<Db> toDb;
   std::set<std::string> tables;
   log4cxx::LoggerPtr log;
+  std::size_t dbRw;
 };
 
 /*****************************************************************************/

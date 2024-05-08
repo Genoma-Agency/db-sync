@@ -235,9 +235,6 @@ int main(int argc, char* argv[]) {
   // wait thread termination
   bool someRunning = true;
   do {
-    if(manager->canRun() && timer.elapsed().elapsed().duration() > std::chrono::seconds(30))
-      manager->stop();
-
     if(someRunning)
       std::this_thread::sleep_for(std::chrono::seconds(1));
     someRunning = false;

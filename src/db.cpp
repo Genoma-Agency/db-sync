@@ -24,7 +24,74 @@ namespace dbsync {
 const std::string SQL_NULL_STRING{ (const char*)u8"∅" };
 const std::string SQL_MD5_CHECK{ "`#MD5@CHECK#`" };
 
-const std::string Db::SQL_TABLES{ R"#(
+/*****************************************************************************/
+
+DbBase::DbBase(const std::string r)
+    : ref{ r }, log{ log4cxx::Logger::getLogger(LOG_DB) } {}
+
+DbBase::~DbBase() {
+  if(session && session->is_connected()) {
+    LOG4CXX_DEBUG_FMT(log, "<{}> closing db", ref);
+    session->close();
+  }
+}
+
+void DbBase::transactionBegin() { tx.emplace(sex()); }
+
+void DbBase::transactionCommit() {
+  assert(tx.has_value());
+  tx->commit();
+}
+
+bool DbBase::apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally) {
+  bool ok = false;
+  try {
+    LOG4CXX_TRACE_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, memoryUsage());
+    lambda();
+    LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, memoryUsage());
+    error.clear();
+    ok = true;
+  } catch(soci::soci_error const& e) {
+    LOG4CXX_ERROR_FMT(log, "<{}> [{}] error: {}", ref, opDesc, e.what());
+    error = e.what();
+  } catch(stop_request const& e) {
+    error = e.what();
+  } catch(std::exception const& e) {
+    LOG4CXX_ERROR_FMT(log, "<{}> [{}] fault: {}", ref, opDesc, e.what());
+    error = e.what();
+  }
+  if(finally)
+    try {
+      finally();
+    } catch(std::exception const& e) {
+      LOG4CXX_ERROR_FMT(log, "<{}> [{}] finally fault: {}", ref, opDesc, e.what());
+    }
+  return ok;
+}
+
+bool DbBase::open(const std::string& connection) {
+  assert(!session);
+  return apply(fmt::format("connect {}", connection), [&connection, this] {
+    LOG4CXX_DEBUG_FMT(log, "connecting {}", connection);
+    session = std::make_unique<soci::session>("mysql", connection);
+  });
+}
+
+bool DbBase::query(const std::string& sql, std::function<void(const soci::row&)> consumer) {
+  return apply(sql, [&] {
+    soci::rowset<soci::row> rs = (session->prepare << sql);
+    for(auto it = rs.begin(); it != rs.end(); ++it)
+      consumer(*it);
+  });
+}
+
+bool DbBase::exec(const std::string& sql) {
+  return apply(sql, [&] { *session << sql; });
+}
+
+/*****************************************************************************/
+
+const std::string DbMeta::SQL_TABLES{ R"#(
 select
 	table_name as "NAME"
 from
@@ -36,7 +103,7 @@ order by 1
 ;
 )#" };
 
-const std::string Db::SQL_COLUMNS{ R"#(
+const std::string DbMeta::SQL_COLUMNS{ R"#(
 select
 	column_name as "NAME",
 	data_type as "TYPE",
@@ -54,69 +121,24 @@ where
 ;
 )#" };
 
-Db::Db(const std::string r)
-    : ref{ r }, log{ log4cxx::Logger::getLogger(LOG_DB) } {}
-
-Db::~Db() {
-  if(session && session->is_connected()) {
-    LOG4CXX_DEBUG_FMT(log, "<{}> closing db", ref);
-    session->close();
-  }
-}
-
-void Db::transactionBegin() { tx.emplace(*session); }
-
-void Db::transactionCommit() {
-  assert(tx.has_value());
-  tx->commit();
-}
-
-bool Db::apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally) {
-  bool ok = false;
-  try {
-    LOG4CXX_TRACE_FMT(log, "<{}> apply [{}] [RSS: {}]", ref, opDesc, memoryUsage());
-    lambda();
-    LOG4CXX_TRACE_FMT(log, "<{}> apply done [RSS: {}]", ref, memoryUsage());
-    error.clear();
-    ok = true;
-  } catch(soci::soci_error const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> [{}] error: {}", ref, opDesc, e.what());
-    error = e.what();
-  } catch(std::exception const& e) {
-    LOG4CXX_ERROR_FMT(log, "<{}> [{}] fault: {}", ref, opDesc, e.what());
-    error = e.what();
-  }
-  if(finally)
-    try {
-      finally();
-    } catch(std::exception const& e) {
-      LOG4CXX_ERROR_FMT(log, "<{}> [{}] finally fault: {}", ref, opDesc, e.what());
-    }
-  return ok;
-}
-
-bool Db::open(const std::string& h, int p, const std::string& s, const std::string& user, const std::string& pwd) {
-  assert(!session);
-  std::string connection = fmt::format("host={} port={} db={} user={} password={}", h, p, s, user, pwd);
+bool DbMeta::open(const std::string& h, int p, const std::string& s, const std::string& user, const std::string& pwd) {
+  connection = fmt::format("host={} port={} db={} user={} password={}", h, p, s, user, pwd);
   schema = s;
-  return apply(fmt::format("connect {}", connection), [&connection, this] {
-    std::cout << "connecting " << connection << std::endl;
-    session = std::make_unique<soci::session>("mysql", connection);
-  });
+  return DbBase::open(connection);
 }
 
-bool Db::loadTables(strings& tables) {
-  return apply("load tables", [&] { *session << SQL_TABLES, soci::use(schema), soci::into(tables); });
+bool DbMeta::loadTables(strings& tables) {
+  return apply("load tables", [&] { sex() << SQL_TABLES, soci::use(schema), soci::into(tables); });
 }
 
-bool Db::loadMetadata(std::set<std::string> tables) {
+bool DbMeta::loadMetadata(std::set<std::string> tables) {
   return apply(
       "metadata", [&] {
         std::string table;
         ColumnInfo ci;
         std::string isNullable;
         int pk;
-        soci::statement stInfo = (session->prepare << SQL_COLUMNS,
+        soci::statement stInfo = (sex().prepare << SQL_COLUMNS,
                                   soci::use(schema),
                                   soci::use(table),
                                   soci::into(ci.name),
@@ -135,24 +157,25 @@ bool Db::loadMetadata(std::set<std::string> tables) {
             } while(stInfo.fetch());
           }
           //
-          std::cout << fmt::format("{} `{}` ", ref, table) << std::endl;
+          LOG4CXX_DEBUG_FMT(log, "{} `{}` ", ref, table);
           map.emplace(table, std::move(ti));
         }
       });
 }
 
-void Db::logTableInfo() const {
-  LOG4CXX_INFO_FMT(log, "<{}> metadata information", ref);
+void DbMeta::logTableInfo() const {
   for(auto& [table, info] : map) {
-    LOG4CXX_INFO_FMT(log, "`{}` {}", table, info);
+    LOG4CXX_DEBUG_FMT(log, "`{}` {} {}", table, ref, info);
     for(auto& ci : info.columns) {
-      LOG4CXX_INFO_FMT(log, "  {}", ci);
+      LOG4CXX_DEBUG_FMT(log, "  {}", ci);
     }
   }
 }
 
+/*****************************************************************************/
+
 bool Db::loadPk(bool source, const std::string& table, TableKeys& data, std::size_t bulk) {
-  auto tm = metadata().at(table);
+  auto tm = meta->metadata(table);
   std::string ref = source ? "source" : "target";
   std::string desc;
   strings pk;
@@ -175,48 +198,37 @@ bool Db::loadPk(bool source, const std::string& table, TableKeys& data, std::siz
   std::size_t loaded = bulk;
   desc = ref + " key loading";
   while(ok && loaded == bulk) {
-    progress(table, timer, desc.c_str(), data.size());
+    progress(log, table, timer, desc.c_str(), data.size());
     std::string sql = fmt::format("{} LIMIT {} OFFSET {}", select, bulk, data.size());
     loaded = 0;
-    ok = query(sql, [&](const soci::row& row) {
+    ok = DbBase::query(sql, [&](const soci::row& row) {
       data.loadRow(row);
       loaded++;
+      manager->checkRun();
     });
   };
   desc = ref + " key loaded";
-  progress(table, timer, desc.c_str(), data.size());
+  progress(log, table, timer, desc.c_str(), data.size());
   LOG4CXX_TRACE_FMT(log, "{} load done [RSS: {}]", ref, memoryUsage());
   return ok;
 };
 
 bool Db::query(const std::string& sql, TableData& data) {
-  return query(sql, [&](const soci::row& row) { data.loadRow(row); });
-}
-
-bool Db::query(const std::string& sql, std::function<void(const soci::row&)> consumer) {
-  return apply(sql, [&] {
-    soci::rowset<soci::row> rs = (session->prepare << sql);
-    for(auto it = rs.begin(); it != rs.end(); ++it)
-      consumer(*it);
-  });
-}
-
-bool Db::exec(const std::string& sql) {
-  return apply(sql, [&] { *session << sql; });
+  return DbBase::query(sql, [&](const soci::row& row) { data.loadRow(row); });
 }
 
 bool Db::insertPrepare(const std::string& table) {
   std::stringstream s;
   s << "INSERT INTO `" << table << "` VALUES(:v0";
-  for(int i = 1; i < map.at(table).columns.size(); i++)
+  for(int i = 1; i < meta->metadata(table).columns.size(); i++)
     s << ",:v" << i;
   s << ')';
   std::string sql = s.str();
-  return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
+  return apply(sql, [&] { stmtWrite = (sex().prepare << sql); });
 }
 
 bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
-  assert(map.at(table).columns.size() == row->size());
+  assert(meta->metadata(table).columns.size() == row->size());
   assert(stmtWrite.has_value());
   return apply(
       "exec prepared insert",
@@ -228,7 +240,7 @@ bool Db::insertExecute(const std::string& table, const std::unique_ptr<TableRow>
 }
 
 bool Db::updatePrepare(const std::string& table, const strings& keys, const strings& fields) {
-  assert(map.at(table).columns.size() == fields.size());
+  assert(meta->metadata(table).columns.size() == fields.size());
   keysCount = keys.size();
   std::stringstream s;
   s << "UPDATE `" << table << "` SET `" << fields[keysCount] << "`=:v0";
@@ -238,11 +250,11 @@ bool Db::updatePrepare(const std::string& table, const strings& keys, const stri
   for(int i = 1; i < keysCount; i++)
     s << " AND `" << keys[i] << "`=:k" << i;
   std::string sql = s.str();
-  return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
+  return apply(sql, [&] { stmtWrite = (sex().prepare << sql); });
 }
 
 bool Db::updateExecute(const std::string& table, const std::unique_ptr<TableRow>& row) {
-  assert(map.at(table).columns.size() == row->size());
+  assert(meta->metadata(table).columns.size() == row->size());
   assert(stmtWrite.has_value());
   row->rotate(keysCount);
   return apply(
@@ -262,7 +274,7 @@ bool Db::deletePrepare(const std::string& table, const strings& keys) {
   for(int i = 1; i < keysCount; i++)
     s << " AND `" << keys[i] << "`=:v" << i;
   std::string sql = s.str();
-  return apply(sql, [&] { stmtWrite = (session->prepare << sql); });
+  return apply(sql, [&] { stmtWrite = (sex().prepare << sql); });
 }
 
 bool Db::deleteExecute(const std::string& table, const TableKeys& keys, long index) {
@@ -280,7 +292,7 @@ bool Db::deleteExecute(const std::string& table, const TableKeys& keys, long ind
 bool Db::comparePrepare(const std::string& table, const std::size_t bulk) {
   assert(bulk > 0);
   readCount = bulk;
-  auto tm = metadata().at(table);
+  auto tm = meta->metadata(table);
   strings pk;
   strings fields;
   strings order;
@@ -307,7 +319,7 @@ bool Db::comparePrepare(const std::string& table, const std::size_t bulk) {
   }
   s << ") ORDER BY " << ba::join(order, ",");
   std::string sql = s.str();
-  return apply(sql, [&] { stmtRead = (session->prepare << sql); });
+  return apply(sql, [&] { stmtRead = (sex().prepare << sql); });
 }
 
 bool Db::selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk) {
@@ -330,7 +342,7 @@ bool Db::selectPrepare(const std::string& table, const strings& keys, const std:
   }
   s << ')';
   std::string sql = s.str();
-  return apply(sql, [&] { stmtRead = (session->prepare << sql); });
+  return apply(sql, [&] { stmtRead = (sex().prepare << sql); });
 }
 
 bool Db::selectExecute(const std::string& table, const TableKeys& keys, TableKeysIterator& iter, TableData& into) {
@@ -353,8 +365,10 @@ bool Db::selectExecute(const std::string& table, const TableKeys& keys, TableKey
         stmtRead->execute(false);
         soci::rowset_iterator<soci::row> it(*stmtRead, row);
         soci::rowset_iterator<soci::row> end;
-        for(; it != end; ++it)
+        for(; it != end; ++it) {
           into.loadRow(row);
+          manager->checkRun();
+        }
       },
       std::bind(&soci::statement::bind_clean_up, *stmtRead));
 }

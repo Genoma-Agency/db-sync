@@ -86,30 +86,74 @@ private:
 
 /*****************************************************************************/
 
+class DbBase {
+public:
+  DbBase(const std::string ref);
+  virtual ~DbBase();
+  bool open(const std::string& connection);
+  const std::string& reference() const { return ref; }
+  const std::string& lastError() const { return error; }
+  void transactionBegin();
+  void transactionCommit();
+  bool query(const std::string& sql, std::function<void(const soci::row&)> consumer);
+  bool exec(const std::string& sql);
+
+protected:
+  bool apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally = nullptr);
+  soci::session& sex() { return *session; }
+
+private:
+  std::unique_ptr<soci::session> session;
+  std::optional<soci::transaction> tx;
+  std::string error;
+
+protected:
+  const std::string ref;
+  log4cxx::LoggerPtr log;
+};
+
+/*****************************************************************************/
+
+class DbMeta : public DbBase {
+public:
+  DbMeta(const std::string ref)
+      : DbBase{ ref } {}
+  virtual ~DbMeta(){};
+  bool
+  open(const std::string& host, int port, const std::string& schema, const std::string& user, const std::string& pwd);
+  bool loadTables(strings& tables);
+  bool loadMetadata(std::set<std::string> tables);
+  void logTableInfo() const;
+  const MetadataMap& metadata() const { return map; };
+  const TableInfo& metadata(const std::string& table) const { return map.at(table); };
+  const std::string& schemaName() const { return schema; };
+  const std::string& connectionString() const { return connection; };
+
+private:
+  std::string schema;
+  std::string connection;
+  MetadataMap map;
+  static const std::string SQL_TABLES;
+  static const std::string SQL_COLUMNS;
+};
+
+/*****************************************************************************/
+
+class Operation;
 class TableKeys;
 class TableKeysIterator;
 class TableData;
 class TableRow;
 
-class Db {
+class Db : public DbBase {
 
 public:
-  Db(const std::string ref);
-  ~Db();
-  bool
-  open(const std::string& host, int port, const std::string& schema, const std::string& user, const std::string& pwd);
-  bool loadTables(strings& tables);
-  bool loadMetadata(std::set<std::string> tables);
-  const std::string& reference() const { return ref; }
-  const std::string& lastError() const { return error; }
-  const MetadataMap& metadata() const { return map; };
-  void logTableInfo() const;
-  void transactionBegin();
-  void transactionCommit();
+  Db(const std::shared_ptr<dbsync::Operation> o, const std::shared_ptr<DbMeta> m)
+      : DbBase{ m->reference() }, manager{ o }, meta{ m } {}
+  virtual ~Db() {}
+  bool open() { return DbBase::open(meta->connectionString()); }
   bool loadPk(bool source, const std::string& table, TableKeys& data, std::size_t bulk);
   bool query(const std::string& sql, TableData& data);
-  bool query(const std::string& sql, std::function<void(const soci::row&)> consumer);
-  bool exec(const std::string& sql);
   bool insertPrepare(const std::string& table);
   bool insertExecute(const std::string& table, const std::unique_ptr<TableRow>& row);
   bool updatePrepare(const std::string& table, const strings& keys, const strings& fields);
@@ -119,31 +163,20 @@ public:
   bool comparePrepare(const std::string& table, const std::size_t bulk);
   bool selectPrepare(const std::string& table, const strings& keys, const std::size_t bulk);
   bool selectExecute(const std::string& table, const TableKeys& keys, TableKeysIterator& iter, TableData& into);
-  soci::details::session_backend* backend() { return session->get_backend(); };
 
 private:
-  bool apply(const std::string& opDesc, std::function<void(void)> lambda, std::function<void(void)> finally = nullptr);
   void bind(std::optional<soci::statement>& stmt,
             const std::unique_ptr<TableRow>& row,
             const int startIndex,
             const int endIndex);
 
 private:
-  const std::string ref;
-  std::unique_ptr<soci::session> session;
-  std::optional<soci::transaction> tx;
-  MetadataMap map;
-  log4cxx::LoggerPtr log;
-  std::string schema;
+  const std::shared_ptr<dbsync::Operation> manager;
+  const std::shared_ptr<DbMeta> meta;
   std::optional<soci::statement> stmtRead;
   std::optional<soci::statement> stmtWrite;
   std::size_t readCount;
   int keysCount;
-  std::string error;
-
-private:
-  static const std::string SQL_TABLES;
-  static const std::string SQL_COLUMNS;
 };
 }
 

@@ -2,9 +2,10 @@
 <log4j:configuration xmlns:log4j="http://jakarta.apache.org/log4j/">
 
     <appender name="ConsoleAppender" class="org.apache.log4j.ConsoleAppender">
+        <param name="Threshold" value="Info"/>
         <param name="Target" value="System.out"/>
         <layout class="org.apache.log4j.PatternLayout">
-            <param name="ConversionPattern" value="[%d{yyyy-MM-dd HH:mm:ss.SSS}] [%f] [%C#%M:%L] [%c] [%p] [%t] %m%n"/>
+            <param name="ConversionPattern" value="%m%n"/>
         </layout>
     </appender>
 
@@ -12,12 +13,13 @@
         <param name="file" value="./db-sync.log"/>
         <param name="append" value="false"/>
         <layout class="org.apache.log4j.PatternLayout">
-            <param name="ConversionPattern" value="[%d{yyyy-MM-dd HH:mm:ss.SSS}] [%f] [%C#%M:%L] [%c] [%p] [%t] %m%n"/>
+            <param name="ConversionPattern" value="[%d{yyyy-MM-dd HH:mm:ss.SSS}] [%t] [%f] [%C#%M:%L] [%c] [%p] %m%n"/>
         </layout>
     </appender>
 
     <root>
         <priority value="all" />
+        <appender-ref ref="ConsoleAppender"/>
         <appender-ref ref="FileAppender"/>
     </root>
 

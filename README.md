@@ -1,6 +1,6 @@
 # db-sync
 
-Mysql/Mariadb records transfer utility.
+Mysql/Mariadb multithread records transfer utility.
 
 This application copy/sync records between databases.
 
@@ -26,7 +26,7 @@ All tables in the source database must already be present and identical in the d
 ## Usage
 
 ```
-$ ./db-sync 
+$ ./db-sync
 Allowed arguments:
   -h [ --help ]                         print this help message
   -v [ --version ]                      print version
@@ -36,8 +36,7 @@ Allowed arguments:
                                         database
   --update                              enable update of records from source to
                                         target
-  --nofail                              don't stop if error on destination 
-                                        records
+  --nofail                              don't stop if error on target records
   --disablebinlog                       disable binary log (privilege required)
   --fromHost arg                        source database host IP or name
   --fromPort arg (= 3306)               source database port
@@ -52,6 +51,8 @@ Allowed arguments:
   --tables arg                          tables to process (if none are 
                                         provided, use all tables)
   --logConfig arg (= ./db-sync-log.xml) path of logger xml configuration
+  --jobs arg (= 1)                      number of parallel execution jobs, use 
+                                        0 to set as the numbers of cores
   --pkBulk arg (= 10000000)             number of primary keys to read with a 
                                         single query
   --compareBulk arg (= 10000)           number of records to read to compare 
@@ -59,6 +60,7 @@ Allowed arguments:
                                         used
   --modifyBulk arg (= 5000)             number of records to read to 
                                         insert/update in a single transaction
+
 ```
 
 ### Modes
@@ -148,11 +150,12 @@ To copy/sync a table the application loads all primary keys in memory from both 
 
 Memory usage is controlled by three arguments:
 
+- `jobs` 
 - `pkBulk` 
 - `compareBulk`
 - `modifyBulk`
 
-To calculate the approximate maximum memory required you can use the formula:
+To calculate the approximate maximum memory required for table T you can use the formula:
 
 - T = table with the highest number of rows (sum of source and target)
 - ST = rows count of T in source
@@ -166,7 +169,9 @@ To calculate the approximate maximum memory required you can use the formula:
 - MC = `compareBulk` * (PK + 100)
 - MD = ( TF * 100 + TS ) * `modifyBulk`;
 
-approximate max memory used = MI + min(ML, MC, MD)
+approximate max memory used for T = MI + min(ML, MC, MD)
+
+If N = `jobs` and N > 1 you have to consider that N tables are processed in parallel.
 
 ## Required libraries
 
@@ -239,5 +244,4 @@ cd db-sync
 ## Todo
 
 - support of other database engines
-- parallel tables processing with a configurable thread pool
 

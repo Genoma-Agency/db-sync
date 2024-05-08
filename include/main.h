@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <boost/algorithm/algorithm.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
@@ -35,6 +36,7 @@
 #include <set>
 #include <soci/soci.h>
 #include <string>
+#include <thread>
 #include <time.h>
 #include <utils.hxx>
 #include <variant>
@@ -55,7 +57,8 @@ using DbValue = std::variant<int, long long, unsigned long long, double, std::ti
 using DbField = std::pair<soci::data_type, DbValue>;
 using DbRecord = std::vector<DbField>;
 
-void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size = 0);
+void progress(
+    log4cxx::LoggerPtr& log, const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size = 0);
 
 extern std::size_t maxMemoryKb;
 std::string memoryUsage();

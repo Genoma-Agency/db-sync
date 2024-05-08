@@ -21,20 +21,23 @@
 
 namespace dbsync {
 
-Operation::Operation(const OperationConfig& c, std::unique_ptr<Db> src, std::unique_ptr<Db> dest) noexcept
-    : config{ c },
-      fromDb{ std::move(src) },
-      toDb{ std::move(dest) },
-      log{ log4cxx::Logger::getLogger(LOG_OPERATION) },
-      dbRw{ 0 } {}
+Operation::Operation(const OperationConfig& c,
+                     std::shared_ptr<dbsync::DbMeta> src,
+                     std::shared_ptr<dbsync::DbMeta> dest) noexcept
+    : config{ c }, fromDb{ src }, toDb{ dest }, log{ log4cxx::Logger::getLogger(LOG_OPERATION) }, dbRw{ 0 } {}
 
-Operation::~Operation() {
-  fromDb.reset(nullptr);
-  toDb.reset(nullptr);
+void Operation::checkRun() const {
+  if(!run.load())
+    throw stop_request();
+}
+
+void Operation::stop() {
+  LOG4CXX_INFO(log, "shutdown requested");
+  run = false;
 }
 
 bool Operation::checkTables(const strings& src, const strings& dest) {
-  bool tablesOk = true;
+  run = true;
   if(config.tables.empty()) {
     LOG4CXX_DEBUG(log, "tables filter empty - using all tables from source");
     tables.insert(src.begin(), src.end());
@@ -42,42 +45,40 @@ bool Operation::checkTables(const strings& src, const strings& dest) {
     LOG4CXX_DEBUG_FMT(log, "tables filter: {}", ba::join(config.tables, ", "));
     for(auto& f : config.tables) {
       if(std::find(src.begin(), src.end(), f) == src.end()) {
-        tablesOk = false;
+        run = false;
         LOG4CXX_ERROR_FMT(log, "table `{}` not found in source", f);
-        std::cerr << "table `" << f << "` not found in source" << std::endl;
       } else {
         tables.insert(f);
       }
     }
   }
-  if(!tablesOk)
+  if(!run.load())
     return false;
-  tablesOk = true;
   for(auto& f : tables) {
     if(std::find(dest.begin(), dest.end(), f) == src.end()) {
-      tablesOk = false;
+      run = false;
       LOG4CXX_ERROR_FMT(log, "table `{}` not found in target", f);
-      std::cerr << "table `" << f << "` not found in target" << std::endl;
     }
   }
-  if(!tablesOk)
+  if(!run.load())
     return false;
   LOG4CXX_INFO_FMT(log, "tables to process: {}", ba::join(tables, ", "));
   return true;
 }
 
 bool Operation::checkMetadata() {
+  assert(run.load());
   assert(!tables.empty());
   if(!fromDb->loadMetadata(tables))
-    return false;
+    return run = false;
   fromDb->logTableInfo();
   if(!toDb->loadMetadata(tables))
-    return false;
+    return run = false;
   toDb->logTableInfo();
   bool checkColumns = true;
   std::for_each(
       tables.begin(), tables.end(), [&](const std::string& table) { checkColumns &= checkMetadataColumns(table); });
-  return checkColumns;
+  return run = checkColumns;
 }
 
 bool Operation::checkMetadataColumns(const std::string& table) {
@@ -87,7 +88,6 @@ bool Operation::checkMetadataColumns(const std::string& table) {
   auto dc = dest.columns.size();
   if(sc != dc) {
     LOG4CXX_ERROR_FMT(log, "table \"{}\" columns count mismatch [source {}] [target {}]", table, sc, dc);
-    std::cerr << "Table \"" << table << "\" columns count mismatch" << std::endl;
     return false;
   }
   bool columnsOk = true;
@@ -95,166 +95,174 @@ bool Operation::checkMetadataColumns(const std::string& table) {
     if(src.columns[i] != dest.columns[i]) {
       LOG4CXX_ERROR_FMT(
           log, "table \"{}\" column {} mismatch [source {}] [target {}]", table, i, src.columns[i], dest.columns[i]);
-      std::cerr << "Table \"" << table << "\" column " << i << " mismatch " << src.columns[i]
-                << " != " << dest.columns[i] << std::endl;
       columnsOk = false;
     }
   }
   return columnsOk;
 }
 
-bool Operation::preExecute() {
+std::string Operation::tableToProcess() {
+  std::lock_guard<std::mutex> lock(mutex);
+  if(tables.empty() || !run.load())
+    return {};
+  return tables.extract(tables.begin()).value();
+}
+
+/*****************************************************************************/
+
+OpJob::OpJob(std::shared_ptr<dbsync::Operation> m) noexcept
+    : manager{ m }, log{ log4cxx::Logger::getLogger(LOG_OPERATION) }, ret{ false }, run{ false } {}
+
+bool OpJob::init() {
+  fromDb = std::make_unique<dbsync::Db>(manager, manager->source());
+  if(!fromDb->open())
+    return false;
+  toDb = std::make_unique<dbsync::Db>(manager, manager->target());
+  if(!toDb->open())
+    return false;
   if(!toDb->exec("SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0"))
     return false;
   if(!toDb->exec("SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0"))
     return false;
-  if(config.disableBinLog)
+  if(manager->configuration().disableBinLog)
     if(!toDb->exec("SET SESSION SQL_LOG_BIN=0"))
       return false;
   return true;
 }
 
-bool Operation::postExecute(bool executeOk) {
-  if(!toDb->exec("SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS"))
-    return false;
-  if(!toDb->exec("SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS"))
-    return false;
-  if(config.disableBinLog)
-    if(!toDb->exec("SET SESSION SQL_LOG_BIN=1"))
-      return false;
-  return true;
-}
-
-bool Operation::execute() {
-  LOG4CXX_DEBUG_FMT(log, "start processing with configuration {}", config);
-  bool ok = true;
-  TimerMs timer;
-  auto iter = tables.begin();
-  std::string m{ config.mode == Mode::Copy ? "copy" : "sync" };
-  while((config.dryRun || ok) && iter != tables.end()) {
-    auto& table = *iter;
-    auto src = fromDb->metadata().at(table);
+void OpJob::execute() {
+  LOG4CXX_DEBUG_FMT(log, "start processing with configuration {}", manager->configuration());
+  std::string mode{ manager->configuration().mode == Mode::Copy ? "copy" : "sync" };
+  std::string dryRun{ manager->configuration().dryRun ? "dry run" : "" };
+  std::string table;
+  run = ret = true;
+  while(ret && manager->canRun() && !(table = manager->tableToProcess()).empty()) {
+    auto src = manager->source()->metadata(table);
     if(src.columns.empty()) {
       LOG4CXX_INFO_FMT(log, "`{}` empty table", table);
-      std::cout << fmt::format("`{}` empty table", table) << std::endl;
     } else {
-      LOG4CXX_INFO_FMT(log, "`{}` {} table ", table, m);
-      std::cout << fmt::format("`{}` {} {}", table, m, config.dryRun ? "dry run" : "") << std::endl;
+      LOG4CXX_INFO_FMT(log, "`{}` {} {}", table, mode, dryRun);
       TimerMs timerTable;
-      ok = execute(table);
-      std::cout << fmt::format("`{}` processed in {}", table, timerTable.elapsed().elapsed().string()) << std::endl;
+      ret = execute(table);
+      LOG4CXX_INFO_FMT(log, "`{}` processed in {}", table, timerTable.elapsed().elapsed().string());
     }
-    iter++;
   }
-  auto time = timer.elapsed().elapsed().string();
-  std::cout << fmt::format(
-      "completed in {} db R/W {:L} maximum memory used {}", time, dbRw, util::proc::maxMemoryUsage())
-            << std::endl;
-  return ok;
+  if(!manager->canRun())
+    LOG4CXX_DEBUG(log, "stop requested");
+  run = false;
 }
 
-bool Operation::execute(const std::string& table) {
+bool OpJob::execute(const std::string& table) {
   LOG4CXX_DEBUG_FMT(log, "`{}` start processing", table);
   // load source primary key
   TableKeys srcKeys;
   auto srcLoad = std::async(std::launch::async, [&] {
-    auto loaded = fromDb->loadPk(true, table, srcKeys, config.pkBulk);
-    if(loaded)
+    auto loaded = fromDb->loadPk(true, table, srcKeys, manager->configuration().pkBulk);
+    if(loaded) {
       srcKeys.sort("source");
-    dbRw += srcKeys.size();
+      manager->addRw(srcKeys.size());
+    }
     return loaded;
   });
   // load target primary key
   TableKeys destKeys;
   auto destLoad = std::async(std::launch::async, [&] {
-    auto loaded = toDb->loadPk(false, table, destKeys, config.pkBulk);
-    if(loaded)
+    auto loaded = toDb->loadPk(false, table, destKeys, manager->configuration().pkBulk);
+    if(loaded) {
       destKeys.sort("target");
-    dbRw += destKeys.size();
+      manager->addRw(destKeys.size());
+    }
     return loaded;
   });
   // wait asynch load
   bool loaded;
   loaded = srcLoad.get();
+  if(!manager->canRun())
+    return false;
   assert(loaded);
   loaded = destLoad.get();
+  if(!manager->canRun())
+    return false;
   assert(loaded);
   // compare primary keys between source and target
   auto diff = compareKeys(table, srcKeys, destKeys);
+  if(!manager->canRun())
+    return false;
   // copy records from source to target
   if(!executeAdd(table, srcKeys, std::get<0>(diff)))
     return false;
   // update records from source to target
-  if(config.update)
+  if(manager->configuration().update)
     if(!executeUpdate(table, srcKeys, std::get<1>(diff)))
       return false;
   // remove records from target
-  if(config.mode == Mode::Sync)
+  if(manager->configuration().mode == Mode::Sync)
     if(!executeDelete(table, destKeys, std::get<2>(diff)))
       return false;
   return true;
 }
 
-bool Operation::executeAdd(const std::string& table, TableKeys& srcKeys, std::size_t total) {
+bool OpJob::executeAdd(const std::string& table, TableKeys& srcKeys, std::size_t total) {
   if(total == 0)
     return true;
   TimerMs timer{ total };
   std::size_t count = 0;
-  std::size_t bulk = std::min(total, config.modifyBulk);
+  std::size_t bulk = std::min(total, manager->configuration().modifyBulk);
   TableData srcRecord{ true, table, bulk };
   TableKeysIterator indexIter = srcKeys.iter(true);
   toDb->insertPrepare(table);
-  progress(table, timer, "copy", count, total);
+  progress(log, table, timer, "copy", count, total);
   while(!indexIter.end()) {
-    bulk = std::min(total - count, config.modifyBulk);
-    if(count == 0 || bulk < config.modifyBulk)
+    bulk = std::min(total - count, manager->configuration().modifyBulk);
+    if(count == 0 || bulk < manager->configuration().modifyBulk)
       fromDb->selectPrepare(table, srcKeys.columnNames(), bulk);
     srcRecord.clear();
     if(!fromDb->selectExecute(table, srcKeys, indexIter, srcRecord)) {
       auto r = srcKeys.rowString(indexIter.value());
-      std::cerr << fmt::format("`{}` select failed at key {} {}", table, r, fromDb->lastError()) << std::endl;
+      LOG4CXX_ERROR_FMT(log, "`{}` select failed at key {} {}", table, r, fromDb->lastError());
       return false;
     }
     assert(srcRecord.size() > 0);
-    progress(table, timer, "copy load", count + srcRecord.size(), total);
+    progress(log, table, timer, "copy load", count + srcRecord.size(), total);
     toDb->transactionBegin();
     for(int i = 0; i < srcRecord.size(); i++) {
       if(feedback(count + i + 1, srcRecord.size(), total))
-        progress(table, timer, "insert", count + i + 1, total);
+        progress(log, table, timer, "insert", count + i + 1, total);
       LOG4CXX_TRACE_FMT(log, "`{}` insert {}: {}", table, count + i + 1, srcRecord.rowString(i));
-      if(!config.dryRun && !toDb->insertExecute(table, srcRecord.at(i))) {
+      if(!manager->configuration().dryRun && !toDb->insertExecute(table, srcRecord.at(i))) {
         auto record = srcRecord.rowString(i);
-        std::cerr << "insert failed for " << record << ' ' << toDb->lastError() << std::endl;
         LOG4CXX_ERROR_FMT(log, "`{}` insert failed {} {}", table, record, toDb->lastError());
-        if(!config.noFail)
+        if(!manager->configuration().noFail)
           return false;
       }
+      if(!manager->canRun())
+        return false;
     }
     toDb->transactionCommit();
     count += srcRecord.size();
-    dbRw += srcRecord.size();
+    manager->addRw(srcRecord.size());
   }
-  progress(table, timer, "copied", count);
+  progress(log, table, timer, "copied", count);
   return true;
 }
 
-bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std::size_t total) {
+bool OpJob::executeUpdate(const std::string& table, TableKeys& srcKeys, std::size_t total) {
   if(total == 0)
     return true;
   TimerMs timer{ total };
   std::size_t count = 0;
-  std::size_t bulk = std::min(total, config.compareBulk);
+  std::size_t bulk = std::min(total, manager->configuration().compareBulk);
   TableData srcCompare{ true, table, bulk, true };
   TableData destCompare{ false, table, bulk, true };
   // filter record which need to be updateb (md5 sum fileds compare)
   srcKeys.revertFlags();
   TableKeysIterator fromIter = srcKeys.iter(true);
   TableKeysIterator toIter = srcKeys.iter(true);
-  progress(table, timer, "compare fields md5", 0, total);
+  progress(log, table, timer, "compare fields md5", 0, total);
   while(!fromIter.end()) {
     TableKeysIterator iter{ fromIter };
-    bulk = std::min(total - count, config.modifyBulk);
-    if(count == 0 || bulk < config.modifyBulk) {
+    bulk = std::min(total - count, manager->configuration().modifyBulk);
+    if(count == 0 || bulk < manager->configuration().modifyBulk) {
       fromDb->comparePrepare(table, bulk);
       toDb->comparePrepare(table, bulk);
     }
@@ -268,25 +276,23 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
     });
     bool loaded = srcLoad.get() && destLoad.get();
     if(!loaded) {
-      std::cerr << fmt::format(
-          "`{}` load md5 sum failed - source [{}] target [{}]", table, fromDb->lastError(), toDb->lastError())
-                << std::endl;
+      LOG4CXX_ERROR_FMT(
+          log, "`{}` load md5 sum failed - source [{}] target [{}]", table, fromDb->lastError(), toDb->lastError());
       return false;
     }
     assert(srcCompare.size() == destCompare.size());
-    dbRw += srcCompare.size() + destCompare.size();
+    manager->addRw(srcCompare.size() + destCompare.size());
     for(int i = 0; i < srcCompare.size(); i++, count++) {
       TableRow& srcRow = *srcCompare.at(i);
       TableRow& destRow = *destCompare.at(i);
       assert(srcRow <=> destRow == std::partial_ordering::equivalent);
       /*
-      std::cout << fmt::format("{} -> {} > KEY {} SRC {} TARGET {}",
+      LOG4CXX_TRACE_FMT(log, "{} -> {} > KEY {} SRC {} TARGET {}",
                                iter.value(),
                                iter.ref(),
                                srcKeys.rowString(iter.value()),
                                srcRow.toString(),
-                               destRow.toString())
-                << std::endl;
+                               destRow.toString());
       */
 #ifdef DEBUG
       assert(srcKeys.check(iter.value(), srcRow.toRecord()));
@@ -297,59 +303,62 @@ bool Operation::executeUpdate(const std::string& table, TableKeys& srcKeys, std:
       srcKeys.setFlag(iter.value(), srcMd5 <=> destMd5 != std::partial_ordering::equivalent);
       ++iter;
     }
-    progress(table, timer, "comparing fields md5", count, total);
+    if(!manager->canRun())
+      return false;
+    progress(log, table, timer, "comparing fields md5", count, total);
   }
-  progress(table, timer, "compared fields md5", total);
+  progress(log, table, timer, "compared fields md5", total);
   // begin updates
   total = srcKeys.size(true);
   if(total == 0) {
-    std::cout << fmt::format("`{}` no record to update found", table) << std::endl;
+    LOG4CXX_INFO_FMT(log, "`{}` no record to update found", table);
     return true;
   }
-  bulk = std::min(total, config.modifyBulk);
+  bulk = std::min(total, manager->configuration().modifyBulk);
   TableData srcRecord{ true, table, bulk };
-  std::cout << fmt::format("`{}` {} records to update found", table, total) << std::endl;
+  LOG4CXX_INFO_FMT(log, "`{}` {} records to update found", table, total);
   timer.reset(total);
   TableKeysIterator indexIter = srcKeys.iter(true);
   count = 0;
-  progress(table, timer, "update", count, total);
+  progress(log, table, timer, "update", count, total);
   while(!indexIter.end()) {
-    bulk = std::min(total - count, config.modifyBulk);
-    if(count == 0 || bulk < config.modifyBulk)
+    bulk = std::min(total - count, manager->configuration().modifyBulk);
+    if(count == 0 || bulk < manager->configuration().modifyBulk)
       fromDb->selectPrepare(table, srcKeys.columnNames(), bulk);
     srcRecord.clear();
     if(!fromDb->selectExecute(table, srcKeys, indexIter, srcRecord)) {
       auto r = srcKeys.rowString(indexIter.value());
-      std::cerr << fmt::format("`{}` select failed at key {} {}", table, r, fromDb->lastError()) << std::endl;
+      LOG4CXX_ERROR_FMT(log, "`{}` select failed at key {} {}", table, r, fromDb->lastError());
       return false;
     }
     assert(srcRecord.size() > 0);
-    dbRw += srcRecord.size();
-    progress(table, timer, "update load", count + srcRecord.size(), total);
+    manager->addRw(srcRecord.size());
+    progress(log, table, timer, "update load", count + srcRecord.size(), total);
     if(count == 0)
       toDb->updatePrepare(table, srcKeys.columnNames(), srcRecord.columnNames());
     toDb->transactionBegin();
     for(int i = 0; i < srcRecord.size(); i++) {
       if(feedback(count + i + 1, srcRecord.size(), total))
-        progress(table, timer, "update", count + i + 1, total);
+        progress(log, table, timer, "update", count + i + 1, total);
       LOG4CXX_TRACE_FMT(log, "update {}: {}", count + i + 1, srcRecord.rowString(i));
-      if(!config.dryRun && !toDb->updateExecute(table, srcRecord.at(i))) {
+      if(!manager->configuration().dryRun && !toDb->updateExecute(table, srcRecord.at(i))) {
         auto record = srcRecord.rowString(i);
-        std::cerr << fmt::format("`{}` update failed for {} {}", table, record, toDb->lastError()) << std::endl;
-        LOG4CXX_ERROR_FMT(log, "update failed {} {}", record, toDb->lastError());
-        if(!config.noFail)
+        LOG4CXX_ERROR_FMT(log, "`{}` update failed for {} {}", table, record, toDb->lastError());
+        if(!manager->configuration().noFail)
           return false;
       }
+      if(!manager->canRun())
+        return false;
     }
     toDb->transactionCommit();
     count += srcRecord.size();
-    dbRw += srcRecord.size();
+    manager->addRw(srcRecord.size());
   }
-  progress(table, timer, "updated", count);
+  progress(log, table, timer, "updated", count);
   return true;
 }
 
-bool Operation::executeDelete(const std::string& table, TableKeys& destKeys, std::size_t total) {
+bool OpJob::executeDelete(const std::string& table, TableKeys& destKeys, std::size_t total) {
   if(total == 0)
     return true;
   TimerMs timer{ total };
@@ -357,28 +366,29 @@ bool Operation::executeDelete(const std::string& table, TableKeys& destKeys, std
   TableKeysIterator indexIter = destKeys.iter(true);
   toDb->deletePrepare(table, destKeys.columnNames());
   count = 0;
-  progress(table, timer, "deleting", count, total);
+  progress(log, table, timer, "deleting", count, total);
   toDb->transactionBegin();
   while(!indexIter.end()) {
     if(feedback(++count, total, total))
-      progress(table, timer, "deleting", count, total);
+      progress(log, table, timer, "deleting", count, total);
     LOG4CXX_TRACE_FMT(log, "`{}` delete {}: {}", table, count, destKeys.rowString(indexIter.value()));
-    if(!config.dryRun && !toDb->deleteExecute(table, destKeys, indexIter.value())) {
+    if(!manager->configuration().dryRun && !toDb->deleteExecute(table, destKeys, indexIter.value())) {
       auto record = destKeys.rowString(indexIter.value());
-      std::cerr << fmt::format("`{}` delete failed for {} {}", table, record, toDb->lastError()) << std::endl;
       LOG4CXX_ERROR_FMT(log, "`{}` delete failed {} {}", table, record, toDb->lastError());
-      if(!config.noFail)
+      if(!manager->configuration().noFail)
         return false;
     }
+    if(!manager->canRun())
+      return false;
     ++indexIter;
-    dbRw++;
+    manager->addRw(1);
   }
   toDb->transactionCommit();
-  progress(table, timer, "deleted", count);
+  progress(log, table, timer, "deleted", count);
   return true;
 }
 
-bool Operation::feedback(const std::size_t count, const std::size_t bulk, const std::size_t total) const {
+bool OpJob::feedback(const std::size_t count, const std::size_t bulk, const std::size_t total) const {
   if(count == total)
     return true;
   if(count % bulk == 0)
@@ -393,7 +403,7 @@ bool Operation::feedback(const std::size_t count, const std::size_t bulk, const 
 }
 
 std::tuple<std::size_t, std::size_t, std::size_t>
-Operation::compareKeys(const std::string& table, TableKeys& src, TableKeys& dest) {
+OpJob::compareKeys(const std::string& table, TableKeys& src, TableKeys& dest) {
   std::size_t srcIndex = 0;
   std::size_t destIndex = 0;
   while(srcIndex < src.size() && destIndex < dest.size()) {
@@ -416,22 +426,13 @@ Operation::compareKeys(const std::string& table, TableKeys& src, TableKeys& dest
   std::size_t common = src.size() - onlySrc;
   std::size_t onlyDest = dest.size(true);
   assert(common == dest.size() - onlyDest);
-  LOG4CXX_INFO_FMT(log, "`{}` records: source {} target {}", table, srcIndex, destIndex);
-  if(onlySrc == 0)
-    LOG4CXX_INFO_FMT(log, "`{}` only in source empty", table);
-  else
-    LOG4CXX_INFO_FMT(log, "`{}` only in source {}", table, onlySrc);
-  if(common == 0)
-    LOG4CXX_INFO_FMT(log, "`{}` common empty", table);
-  else
-    LOG4CXX_INFO_FMT(log, "`{}` common {}", table, common);
-  if(onlyDest == 0)
-    LOG4CXX_INFO_FMT(log, "`{}` only in target empty", table);
-  else
-    LOG4CXX_INFO_FMT(log, "`{}` only in target {}", table, onlyDest);
-  std::cout << fmt::format(
-      "`{}` primary key compare [only source: {}] [common: {}] [only target: {}]", table, onlySrc, common, onlyDest)
-            << std::endl;
+  LOG4CXX_DEBUG_FMT(log, "`{}` records: source {} target {}", table, srcIndex, destIndex);
+  LOG4CXX_INFO_FMT(log,
+                   "`{}` primary key compare [only source: {}] [common: {}] [only target: {}]",
+                   table,
+                   onlySrc,
+                   common,
+                   onlyDest);
   return std::make_tuple(onlySrc, common, onlyDest);
 }
 

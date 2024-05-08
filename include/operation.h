@@ -28,6 +28,14 @@ std::ostream& operator<<(std::ostream& stream, const Mode& var);
 
 /*****************************************************************************/
 
+class stop_request : public std::runtime_error {
+public:
+  stop_request()
+      : std::runtime_error{ "stop requested" } {}
+};
+
+/*****************************************************************************/
+
 struct OperationConfig {
   Mode mode;
   bool update;
@@ -46,16 +54,50 @@ std::ostream& operator<<(std::ostream& stream, const OperationConfig& var);
 
 class Operation {
 public:
-  Operation(const OperationConfig& config, std::unique_ptr<Db> fromDb, std::unique_ptr<Db> toDb) noexcept;
-  ~Operation();
+  Operation(const OperationConfig& config,
+            std::shared_ptr<dbsync::DbMeta> fromDb,
+            std::shared_ptr<dbsync::DbMeta> toDb) noexcept;
+  ~Operation(){};
+  const OperationConfig& configuration() const { return config; };
+  std::shared_ptr<dbsync::DbMeta> source() const { return fromDb; }
+  std::shared_ptr<dbsync::DbMeta> target() const { return toDb; }
   bool checkTables(const strings& src, const strings& dest);
   bool checkMetadata();
-  bool preExecute();
-  bool execute();
-  bool postExecute(bool executeOk);
+  void addRw(const std::size_t inc) { dbRw += inc; }
+  bool canRun() const { return run.load(); }
+  void checkRun() const;
+  void stop();
+  std::size_t rwCount() const { return dbRw.load(); }
+  int tablesCount() const { return tables.size(); }
+  std::string tableToProcess();
 
 private:
   bool checkMetadataColumns(const std::string& table);
+
+private:
+  const OperationConfig& config;
+  std::shared_ptr<dbsync::DbMeta> fromDb;
+  std::shared_ptr<dbsync::DbMeta> toDb;
+  std::set<std::string> tables;
+  log4cxx::LoggerPtr log;
+  std::atomic_size_t dbRw;
+  std::atomic_bool run;
+  std::mutex mutex;
+};
+
+/*****************************************************************************/
+
+class OpJob {
+public:
+  OpJob(std::shared_ptr<dbsync::Operation> manager) noexcept;
+  OpJob(OpJob&&) = default;
+  ~OpJob(){};
+  bool init();
+  void execute();
+  bool result() const { return ret; }
+  bool isRunning() const { return run; }
+
+private:
   bool execute(const std::string& table);
   bool executeAdd(const std::string& table, TableKeys& srcKeys, std::size_t total);
   bool executeUpdate(const std::string& table, TableKeys& srcKeys, std::size_t total);
@@ -66,12 +108,12 @@ private:
   bool feedback(const std::size_t count, const std::size_t bulk, const std::size_t total) const;
 
 private:
-  const OperationConfig& config;
+  std::shared_ptr<dbsync::Operation> manager;
   std::unique_ptr<Db> fromDb;
   std::unique_ptr<Db> toDb;
-  std::set<std::string> tables;
   log4cxx::LoggerPtr log;
-  std::size_t dbRw;
+  bool ret;
+  bool run;
 };
 
 /*****************************************************************************/

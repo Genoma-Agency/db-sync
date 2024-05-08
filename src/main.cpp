@@ -22,6 +22,8 @@
 #include <log4cxx/basicconfigurator.h>
 #include <log4cxx/xml/domconfigurator.h>
 #include <operation.h>
+#include <signal.h>
+#include <unistd.h>
 
 namespace po = boost::program_options;
 
@@ -38,6 +40,7 @@ b::optional<std::string> toUser;
 b::optional<std::string> toPwd;
 b::optional<std::string> toSchema;
 dbsync::strings tables;
+b::optional<int> jobs;
 b::optional<int> pkBulk;
 b::optional<int> compareBulk;
 b::optional<int> modifyBulk;
@@ -68,6 +71,9 @@ const po::options_description OPTIONS = [] {
   options.add_options()("logConfig, l",
                         po::value<>(&logConfig)->default_value(std::string{ "./db-sync-log.xml" }),
                         "path of logger xml configuration");
+  options.add_options()("jobs",
+                        po::value<>(&jobs)->default_value(1),
+                        "number of parallel execution jobs, use 0 to set as the numbers of cores");
   options.add_options()(
       "pkBulk", po::value<>(&pkBulk)->default_value(10000000), "number of primary keys to read with a single query");
   options.add_options()("compareBulk",
@@ -83,7 +89,15 @@ po::variables_map params;
 
 const int MAX_TABLE = 1000;
 
+std::shared_ptr<dbsync::Operation> manager;
+
+void sigHandler(int unused) {
+  if(manager)
+    manager->stop();
+}
+
 int main(int argc, char* argv[]) {
+  dbsync::TimerMs timer;
   std::setlocale(LC_ALL, "en_US.UTF-8");
   try {
     auto parsed = po::parse_command_line(argc, argv, OPTIONS);
@@ -93,33 +107,32 @@ int main(int argc, char* argv[]) {
     std::cerr << e.what() << std::endl << std::endl;
     return 1;
   }
-
+  // check arguments
   size_t check = params.count("help") + params.count("version") + params.count("copy") + params.count("sync");
   if(check > 1) {
     std::cerr << "only one command argument allowed [help|version|copy|sync]" << std::endl;
     return 2;
   }
-
-  if(pkBulk && *pkBulk < 0) {
-    std::cerr << "pkBulk must be a positive integer" << std::endl;
+  if(jobs && *jobs < 0) {
+    std::cerr << "jobs must be a positive integer" << std::endl;
     return 3;
   }
-
-  if(modifyBulk && *modifyBulk < 0) {
-    std::cerr << "modifyBulk must be a positive integer" << std::endl;
+  if(pkBulk && *pkBulk < 1) {
+    std::cerr << "pkBulk must be a positive integer" << std::endl;
     return 4;
   }
-
+  if(modifyBulk && *modifyBulk < 1) {
+    std::cerr << "modifyBulk must be a positive integer" << std::endl;
+    return 5;
+  }
   if(check == 0 || params.count("help")) {
     std::cout << OPTIONS << std::endl;
     return 0;
   }
-
   if(params.count("version")) {
     std::cout << dbsync::APP_NAME << ' ' << dbsync::APP_RELEASE << std::endl;
     return 0;
   }
-
   // configure logger
   bool xml = false;
   if(logConfig) {
@@ -138,13 +151,12 @@ int main(int argc, char* argv[]) {
   }
   if(!xml)
     log4cxx::BasicConfigurator::configure();
-
   // configure source db
   if(!fromHost || !fromUser || !fromPwd || !fromSchema) {
     std::cerr << "all source arguments must be provided: fromHost, fromUser, fromPwd, fromSchema" << std::endl;
     return 10;
   }
-  std::unique_ptr<dbsync::Db> fromDb = std::make_unique<dbsync::Db>("source");
+  std::shared_ptr<dbsync::DbMeta> fromDb = std::make_shared<dbsync::DbMeta>("source");
   if(!fromDb->open(*fromHost, *fromPort, *fromSchema, *fromUser, *fromPwd)) {
     std::cerr << "source db connection error, see log file for details" << std::endl;
     return 11;
@@ -154,13 +166,12 @@ int main(int argc, char* argv[]) {
     std::cerr << "source db load tables error, see log file for details" << std::endl;
     return 12;
   }
-
   // configure target db
   if(!toHost || !toUser || !toPwd || !toSchema) {
     std::cerr << "all target arguments must be provided: toHost, toUser, toPwd, toSchema" << std::endl;
     return 20;
   }
-  std::unique_ptr<dbsync::Db> toDb = std::make_unique<dbsync::Db>("target");
+  std::shared_ptr<dbsync::DbMeta> toDb = std::make_shared<dbsync::DbMeta>("target");
   if(!toDb->open(*toHost, *toPort, *toSchema, *toUser, *toPwd)) {
     std::cerr << "target db connection error, see log file for details" << std::endl;
     return 21;
@@ -170,14 +181,12 @@ int main(int argc, char* argv[]) {
     std::cerr << "source db load tables error, see log file for details" << std::endl;
     return 22;
   }
-
   std::cout << "source and target database ready" << std::endl;
-
   // sort and unique argument tables
   std::sort(tables.begin(), tables.end());
   auto duplicates = std::unique(tables.begin(), tables.end());
   tables.erase(duplicates, tables.end());
-
+  // check metadata
   dbsync::OperationConfig config{ .mode = params.count("copy") > 0 ? dbsync::Mode::Copy : dbsync::Mode::Sync,
                                   .update = params.count("update") > 0,
                                   .dryRun = params.count("dry-run") > 0,
@@ -187,37 +196,68 @@ int main(int argc, char* argv[]) {
                                   .pkBulk = static_cast<std::size_t>(*pkBulk),
                                   .compareBulk = static_cast<std::size_t>(*compareBulk),
                                   .modifyBulk = static_cast<std::size_t>(*modifyBulk) };
-
-  std::unique_ptr<dbsync::Operation> op
-      = std::make_unique<dbsync::Operation>(config, std::move(fromDb), std::move(toDb));
-
-  if(!op->checkTables(fromTables, toTables)) {
+  manager = std::make_shared<dbsync::Operation>(config, fromDb, toDb);
+  if(!manager->checkTables(fromTables, toTables)) {
     std::cerr << "tables check failed" << std::endl;
     return 30;
   }
-
-  if(!op->checkMetadata()) {
+  if(!manager->checkMetadata()) {
     std::cerr << "metadata check failed" << std::endl;
     return 31;
   }
-
-  if(!op->preExecute()) {
-    std::cerr << "Pre execution failed" << std::endl;
+  // signal handler
+  struct sigaction sig;
+  sig.sa_handler = sigHandler;
+  sigemptyset(&sig.sa_mask);
+  sig.sa_flags = 0;
+  sig.sa_flags |= SA_RESTART;
+  if(sigaction(SIGINT, &sig, 0) && sigaction(SIGTERM, &sig, 0) && sigaction(SIGQUIT, &sig, 0)) {
+    std::cerr << "error installing signal handlers" << std::endl;
+    return 50;
+  }
+  // create and initialize workers
+  int jobCount = std::min(manager->tablesCount(), *jobs > 0 ? *jobs : (int)std::thread::hardware_concurrency());
+  bool ok = true;
+  std::vector<dbsync::OpJob> workers;
+  for(int i = 0; ok && i < jobCount; i++) {
+    std::cout << "creating job " << i + 1 << std::endl;
+    dbsync::OpJob& worker = workers.emplace_back(manager);
+    ok &= worker.init();
+  }
+  if(!ok) {
+    std::cerr << "worker jobs initilization failed" << std::endl;
     return 40;
   }
+  // start jobs
+  std::vector<std::thread> threads(jobCount);
+  for(int i = 0; i < jobCount; i++)
+    threads[i] = std::thread([i, &workers] { workers[i].execute(); });
+  // wait thread termination
+  bool someRunning = true;
+  do {
+    if(manager->canRun() && timer.elapsed().elapsed().duration() > std::chrono::seconds(30))
+      manager->stop();
 
-  int ret = 0;
-
-  if(!op->execute()) {
-    std::cerr << "Execution failed" << std::endl;
-    ret = 100;
-  }
-
-  if(!op->postExecute(ret == 0)) {
-    std::cerr << "Post execution failed" << std::endl;
-  }
-
-  return ret;
+    if(someRunning)
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    someRunning = false;
+    for(auto& worker : workers) {
+      if(worker.isRunning()) {
+        someRunning = true;
+      } else {
+        ok &= worker.result();
+      }
+    }
+    if(!ok && manager->canRun())
+      manager->stop();
+  } while(someRunning);
+  for(auto& thread : threads)
+    thread.join();
+  auto time = timer.elapsed().elapsed().string();
+  std::cout << fmt::format(
+      "completed in {} db R/W {:L} maximum memory used {}", time, manager->rwCount(), util::proc::maxMemoryUsage());
+  manager.reset();
+  return ok ? 0 : 100;
 }
 
 namespace dbsync {
@@ -230,24 +270,23 @@ std::string memoryUsage() {
   return util::proc::memoryString(m);
 }
 
-void progress(const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size) {
+void progress(
+    log4cxx::LoggerPtr& log, const std::string& table, TimerMs& timer, const char* t, int count, std::size_t size) {
   if(count == 0) {
     if(size > 0)
-      std::cout << fmt::format("`{}` begin {} {} records", table, t, size) << std::endl;
+      LOG4CXX_INFO_FMT(log, "`{}` begin {} {} records", table, t, size);
     else
-      std::cout << fmt::format("`{}` begin {} ", table, t) << std::endl;
+      LOG4CXX_INFO_FMT(log, "`{}` begin {} ", table, t);
   } else {
     auto times = timer.elapsed(count + 1);
     auto s = times.speed<std::chrono::seconds>();
     auto e = times.elapsed().string();
     auto m = times.missing().isZero() ? "?" : times.missing().string();
     if(size > 0)
-      std::cout << fmt::format("`{}` {} {}/{} [{:.1f} rows/sec] [elapsed {}] [eta {}]", table, t, count, size, s, e, m)
-                << std::endl;
+      LOG4CXX_INFO_FMT(log, "`{}` {} {}/{} [{:.1f} rows/sec] [elapsed {}] [eta {}]", table, t, count, size, s, e, m);
     else
-      std::cout << fmt::format("`{}` {} {} [{:.1f} rows/sec] [elapsed {}]", table, t, count, s, e) << std::endl;
+      LOG4CXX_INFO_FMT(log, "`{}` {} {} [{:.1f} rows/sec] [elapsed {}]", table, t, count, s, e);
   }
-  std::cout << std::flush;
 };
 
 // log categories
